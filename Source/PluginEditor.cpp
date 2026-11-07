@@ -628,7 +628,7 @@ void Header::paint (juce::Graphics& g)
 
     g.setFont (logoFont (38.0f));
     g.setColour (C::text);
-    g.drawText ("ROOMBREAKER", 22, 8, 270, 40, juce::Justification::centredLeft);
+    g.drawFittedText ("ROOMBREAKER", 22, 8, 266, 40, juce::Justification::centredLeft, 1, 0.7f);   // squeeze, never truncate (Bahnschrift is wider than DIN)
 
     g.setColour (C::dim);
     g.setFont (uiFont (13.0f, true));
