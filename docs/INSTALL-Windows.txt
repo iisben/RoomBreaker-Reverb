@@ -1,0 +1,19 @@
+RoomBreaker for Windows
+=======================
+
+Plugin (VST3)
+  1. Copy the folder "RoomBreaker.vst3" to
+       C:\Program Files\Common Files\VST3\
+  2. Rescan plugins in your DAW (Ableton Live, Cubase, FL Studio, Reaper, Bitwig, Studio One...).
+     RoomBreaker appears under the manufacturer "RoomBreaker", category Reverb.
+
+Standalone
+  RoomBreaker.exe runs without a DAW. Pick your audio device in its Options menu.
+
+Sidechain
+  The plugin has an optional stereo sidechain input. In the Engine page, set
+  "What breaks the walls" to Sidechain or Both, then route a track to the
+  plugin's sidechain in your DAW.
+
+These builds are not code-signed, so Windows SmartScreen may ask for confirmation
+the first time the standalone app is started.

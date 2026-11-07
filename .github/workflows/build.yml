@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows (VST3)
+            os: windows-latest
+          - name: macOS (VST3 + AU)
+            os: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build plugin and tests
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Run tests
+        working-directory: build
+        run: ctest -C Release --output-on-failure
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Recurse "build/RoomBreaker_artefacts/Release/VST3/RoomBreaker.vst3" dist/
+          Copy-Item "build/RoomBreaker_artefacts/Release/Standalone/RoomBreaker.exe" dist/
+          Copy-Item "docs/INSTALL-Windows.txt" dist/
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          cp -R build/RoomBreaker_artefacts/Release/VST3/RoomBreaker.vst3 dist/
+          cp -R build/RoomBreaker_artefacts/Release/AU/RoomBreaker.component dist/
+          cp -R build/RoomBreaker_artefacts/Release/Standalone/RoomBreaker.app dist/
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: RoomBreaker-${{ runner.os }}
+          path: dist
+          if-no-files-found: error
+
+      - name: Upload editor snapshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: editor-snapshots-${{ runner.os }}
+          path: build/*.png
+          if-no-files-found: ignore
