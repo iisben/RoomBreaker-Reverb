@@ -82,7 +82,7 @@ target_include_directories(RoomBreaker PRIVATE Source)
 target_compile_definitions(RoomBreaker PUBLIC
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0
+    JUCE_VST3_CAN_REPLACE_VST2=0)
 
 target_link_libraries(RoomBreaker
     PRIVATE
