@@ -12,17 +12,27 @@ VST3 and Standalone on Windows and macOS, plus AU on macOS. Built with JUCE 8.
 
 The room is drawn as a small cottage on a patch of lawn, and the picture follows the sound:
 
-- **Walls** (North, South, East, West) crack from the window and door corners. The render falls away
-  to show the material underneath, holes open onto the inside of the house, and the glass breaks.
-- **Roof** (the ceiling) loses tiles, opens to the rafters, and the chimney leans and then falls.
-- **Lawn** (the floor) splits, and the house settles off level.
-- Fractures throw debris that lands and stays until the room heals.
+- **Walls** (North, South, East, West) crack from the window and door corners. Then each material
+  fails in its own way: render spalls to bare concrete, tiles and glass panes drop one by one, stone
+  leaves stepped edges, timber strips back to its studs. Holes show the wall's thickness and the room
+  inside. A wall that is nearly gone collapses from the top.
+- **Roof** (the ceiling) slips tiles, shows its battens, opens to the rafters, and the chimney leans
+  and breaks off.
+- **Lawn** (the floor) splits into trenches, and the house settles off level.
+- Fractures throw debris from wherever the wall is failing; rubble piles up against the walls and
+  stays until the room heals.
+- The light and scenery follow the Outside setting, from open sky to a burning city.
 
 Drag to turn the house and double-click to face it again. Hover a wall to read its integrity and load.
 
-| Pristine | Detonated | From behind |
+| Intact | Detonated | From behind |
 |---|---|---|
 | ![](docs/images/editor_pristine.png) | ![](docs/images/editor_detonate.png) | ![](docs/images/editor_back.png) |
+
+Four of the eleven materials, each shown new, part-broken and wrecked:
+
+![Glass atrium and cathedral stone](docs/images/materials_glass_stone.jpg)
+![Ceramic tile and corrugated sheet](docs/images/materials_ceramic_silo.jpg)
 
 ## Features
 

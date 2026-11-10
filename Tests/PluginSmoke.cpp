@@ -617,6 +617,120 @@ int main (int argc, char** argv)
             snap ("editor_back.png");
             ed->getHouse().setViewAngle (0.7854f);
 
+            // Gallery: the house alone, posed at set damage levels in each material and outside.
+            // These are review images; the loop also times a repaint.
+            {
+                auto& house = ed->getHouse();
+                auto& live = ed->getLive();
+                const auto dir = outDir.getChildFile ("gallery");
+                dir.createDirectory();
+                auto pose = [&] (int material, int outside, float damage, float yaw)
+                {
+                    setParam (*plugin, "material", (float) material);
+                    setParam (*plugin, "voidType", (float) outside);
+                    const float spread[6] = { 0.0f, 0.06f, -0.05f, 0.03f, -0.02f, 0.04f };
+                    for (size_t w = 0; w < 6; ++w)
+                        live.frame.integrity[w] = juce::jlimit (0.0f, 1.0f, 1.0f - damage * (1.0f + spread[w]) - (damage > 0.0f ? spread[w] * 0.5f : 0.0f));
+                    house.setViewAngle (yaw);
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+                };
+                // Shots are tiled three across onto contact sheets, six to a sheet.
+                auto save = [&] (const juce::Image& image, const juce::String& name)
+                {
+                    const auto png = dir.getChildFile (name + ".png");
+                    png.deleteFile();
+                    juce::FileOutputStream stream (png);
+                    if (stream.openedOk()) juce::PNGImageFormat().writeImageToStream (image, stream);
+                };
+                const int cellW = house.getWidth(), cellH = house.getHeight();
+                juce::Image sheet (juce::Image::RGB, cellW * 3, cellH * 2, true);
+                int onSheet = 0, sheetNumber = 0;
+                auto flush = [&]
+                {
+                    if (onSheet == 0) return;
+                    save (sheet, "sheet_" + juce::String (sheetNumber++));
+                    sheet.clear (sheet.getBounds(), juce::Colours::black);
+                    onSheet = 0;
+                };
+                auto shot = [&] (const juce::String& name)
+                {
+                    const auto image = house.createComponentSnapshot (house.getLocalBounds(), true, 1.0f);
+                    juce::Graphics sg (sheet);
+                    sg.drawImageAt (image, (onSheet % 3) * cellW, (onSheet / 3) * cellH);
+                    sg.setColour (juce::Colours::black.withAlpha (0.6f));
+                    sg.setFont (14.0f);
+                    sg.drawText (name, (onSheet % 3) * cellW + 60, (onSheet / 3) * cellH + 6, 300, 18, juce::Justification::centredLeft);
+                    if (++onSheet == 6) flush();
+                };
+                auto closeUp = [&] (const juce::String& name)
+                {
+                    save (house.createComponentSnapshot (house.getLocalBounds(), true, 2.0f), name);
+                };
+                // debris in flight: two frames of a detonation
+                plugin->setCurrentProgram (findProgram (*plugin, "Default Bunker"));
+                if (auto* r = findParam (*plugin, "reset")) { r->setValueNotifyingHost (1.0f); play (0.1, 0.0f); r->setValueNotifyingHost (0.0f); }
+                play (0.5, 0.0f);
+                if (auto* d = findParam (*plugin, "detonate")) d->setValueNotifyingHost (1.0f);
+                play (0.15, 0.0f);
+                if (auto* d = findParam (*plugin, "detonate")) d->setValueNotifyingHost (0.0f);
+                play (0.12, 0.0f);
+                closeUp ("close_blast_a");
+                play (0.4, 0.0f);
+                closeUp ("close_blast_b");
+                play (1.5, 0.0f);
+                closeUp ("close_blast_c");
+
+                const float front = 0.7854f;
+                const float levels[] = { 0.0f, 0.3f, 0.55f, 0.8f, 1.0f };
+                for (int k = 0; k < 5; ++k)
+                {
+                    pose (0, 0, levels[k], front);
+                    shot ("concrete_" + juce::String (k));
+                }
+                flush();
+                static const char* materialNames[] = { "concrete", "ceramic", "silo", "hangar", "brutalist", "glass", "stone", "subway", "ice", "timber", "bulkhead" };
+                for (int m = 1; m < 11; ++m)
+                {
+                    pose (m, m % 7, 0.0f, front);
+                    shot (juce::String (materialNames[m]) + "_new");
+                    pose (m, m % 7, 0.62f, front);
+                    shot (juce::String (materialNames[m]) + "_mid");
+                    pose (m, m % 7, 0.93f, front);
+                    shot (juce::String (materialNames[m]) + "_end");
+                }
+                pose (0, 0, 0.7f, 2.4f);
+                shot ("concrete_west");
+                pose (0, 0, 0.7f, 3.9f);
+                shot ("concrete_north");
+                flush();
+                pose (0, 0, 0.0f, front);
+                closeUp ("close_new");
+                pose (0, 0, 0.6f, front);
+                closeUp ("close_mid");
+                pose (0, 0, 0.9f, front);
+                closeUp ("close_end");
+
+                juce::Image canvas (juce::Image::ARGB, house.getWidth(), house.getHeight(), true);
+                double worst = 0.0;
+                for (const float level : { 0.0f, 0.4f, 0.75f, 1.0f })
+                {
+                    pose (0, 0, level, front);
+                    const auto t0 = juce::Time::getMillisecondCounterHiRes();
+                    for (int k = 0; k < 40; ++k)
+                    {
+                        juce::Graphics cg (canvas);
+                        house.paintEntireComponent (cg, true);
+                    }
+                    const double ms = (juce::Time::getMillisecondCounterHiRes() - t0) / 40.0;
+                    worst = std::max (worst, ms);
+                    std::printf ("    house repaint at %3.0f %% damage: %.2f ms\n", (double) level * 100.0, ms);
+                }
+                check (worst < 120.0, "house repaints in reasonable time (about 8 ms on Apple Silicon; CI machines draw in software)");
+
+                pose (0, 0, 0.0f, front);
+                live.frame.integrity.fill (1.0f);
+            }
+
             ed->getInfoPanel().showHelpFor ("impact");
             snap ("editor_info.png");
             ed->getInfoPanel().showHelpFor ({});

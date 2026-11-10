@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(RoomBreaker VERSION 2.1.0 LANGUAGES C CXX)
+project(RoomBreaker VERSION 2.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -75,7 +75,8 @@ target_sources(RoomBreaker PRIVATE
     Source/Presets.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
-    Source/UI/HouseView.cpp)
+    Source/UI/HouseView.cpp
+    Source/UI/HousePaint.cpp)
 
 target_include_directories(RoomBreaker PRIVATE Source)
 

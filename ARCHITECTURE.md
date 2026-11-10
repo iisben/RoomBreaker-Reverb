@@ -16,7 +16,9 @@ Source/
   UI/Widgets.h                 Knob (3 sizes) / ChoiceBox / Segmented / Chip / MomentaryButton
   UI/Help.h                    Info column text for every control and display
   UI/LiveState.h               UI-side copy of the telemetry: frame, flashes, fractures, history
-  UI/HouseView.{h,cpp}         The room as a damaged isometric house (see 5e)
+  UI/HouseView.{h,cpp}         The room as a house: damage generation, debris, camera, mouse (see 5e)
+  UI/HousePaint.cpp            Everything the house view draws
+  UI/HouseModel.h              The house's measurements, materials and outsides (private to the two above)
   DSP/                         JUCE-free, real-time-safe core (compiled and tested here)
     DspUtils.h                 TPT one-pole / SVF, Catmull-Rom delay, allpass, xorshift RNG
     Materials.h                11 material profiles (3 core + 8 dark cinematic) + impact voicing and blurbs
@@ -409,24 +411,61 @@ cards, coloured side bars, emoji, rainbow status colours, every control the same
 
 ## 5e. The house
 
-`HouseView` draws the room as a small isometric cottage on a slab of lawn, in a pure orthographic
-projection (30° elevation, drag to turn, double-click to face it again). Every face is planar, so it
-is drawn in its own (u, v) units through one `AffineTransform`, clipped to its outline; back faces are
-culled and the rest are painted far to near.
+`HouseView` draws the room as a small cottage on a slab of lawn, in a pure orthographic projection
+(30° elevation, drag to turn, double-click to face it again). Every face is planar, so it is drawn in
+its own (u, v) metres through one `AffineTransform`, clipped to its outline; back faces are culled
+and the rest are painted far to near. Patterns, cracks and shadows therefore foreshorten correctly
+at any angle.
 
 | Surface | House part | What damage does |
 |---|---|---|
-| North / South / East / West | the four walls (South has the door) | cracks grow from window and door corners, render spalls to show the material underneath, holes open onto the interior (far walls, floorboards, daylight through far windows), glass breaks |
-| Ceiling | the roof | tiles slip and go missing, holes open to the rafters, the chimney leans then falls |
-| Floor | the lawn | fissures split the grass and the house settles up to ~3° off level |
+| North / South / East / West | the four walls (South has the door) | cracks grow from window and door corners; the finish comes away; holes open; past ~82 % the wall collapses from the top |
+| Ceiling | the roof | tiles slip, then go missing (battens and felt show), then holes open to the rafters; ridge caps fall; the chimney loses its cap, leans and breaks off |
+| Floor | the lawn | fissures open as trenches, the grass dries, and the house settles up to ~3° off level |
 
-* Damage is drawn from integrity alone (d = 1 − I against per-feature thresholds generated once from
-  a fixed seed), so the picture always matches the sound and heals in reverse.
-* Fractures from the telemetry throw debris with simple physics. It lands, stays while the room is
-  damaged and fades as the room heals; dust puffs on big hits; shock and stress shake the view.
-* Material sets the wall finish and what is underneath it (concrete, brick, tile, sheet metal …).
-  Outside sets the backdrop.
-* Hovering a wall names it and shows its integrity, load and state.
+**Damage is drawn from integrity alone** (d = 1 − I against thresholds generated once from a fixed
+seed), so the picture always matches the sound and heals in reverse.
+
+* **Cracks** are polylines that wander about a mean direction, kink and fork. Each point has the
+  damage at which the crack reaches it, so cracks lengthen smoothly and widen with age; they are
+  filled as tapered outlines with a light lip on the side away from the light.
+* **Each material fails its own way** (`Finish` in `HouseModel.h`):
+
+  | Finish comes away as | Used by | Looks like |
+  |---|---|---|
+  | patches (`SpallBlob`) | concrete, brutalist, stone | angular recesses showing aggregate, brick or rubble core |
+  | cells (`SpallCells`) | ceramic, subway tile, glass, timber | tiles and boards drop one by one; panes craze, then fall out |
+  | stains (`SpallStain`) | corrugated sheet, bulkhead plate, ice | scorch, rust or frost where a thicker wall would spall |
+
+  Holes are either ragged breaches (`HoleBlob`) or whole cells going missing (`HoleCells`: stepped
+  stone, empty glazing frames, a stud skeleton). Cell thresholds come from the same weak spots as
+  the patches, so damage sits in the same places whatever the material.
+* **Depth without 3D.** A hole is drawn twice: once in the wall's front face (filled with the colour
+  of the cut edge) and once more, shifted by the wall's thickness, as a clip for the interior. The
+  sliver between the two is the wall's section. Windows and doors use the same trick for their
+  reveals; rebar or studs are drawn half-way between. Concrete that has collapsed leaves rebar stubs
+  above the broken edge.
+* **The interior** (far walls with skirting, floorboards, a rug, rafters, daylight through far windows
+  and through the far walls' own holes) is painted once per frame into an image and shown through
+  every opening.
+* **Light.** Each Outside sets an ambient colour and a sun colour (`Backdrop`); every surface is lit
+  by its normal. Cast shadows are computed, not painted on: the roof's shadow down each sunlit wall,
+  sills and casings, the chimney across the roof, bushes and the house across the lawn. A wrecked
+  house weakens the sun and greys the ambient light instead of drawing a haze over the picture.
+* **Debris.** Fractures throw pieces from where the wall is failing at that moment (the weak spot
+  whose threshold the damage has just crossed). Pieces are shaped by material (chunks, tiles, shards,
+  splinters, scrap), tumble, cast shadows on the lawn, bounce and settle, and fade once they leave
+  the lawn. Dust puffs are soft radial fills. Rubble heaps at the foot of each wall are generated
+  once and revealed by damage, so a state recalled from a session shows the same wreck. A hit across
+  several surfaces at once sends a ring across the grass.
+* **Cost.** The view repaints only when its state signature changes (view angle, integrity, material,
+  hover, particles), so an untouched room costs nothing. The backdrop, the static lawn and the soft
+  slab shadow are cached as images at device resolution. A repaint takes about 2.7 ms with an intact
+  house and 7–8 ms with a wrecked one (Apple Silicon, CoreGraphics).
+* Hovering a wall names it and shows its integrity and load; a compass shows north after turning.
+
+`rb_plugin_smoke` writes a gallery (`renders/gallery/`): contact sheets of every material at three
+damage levels in each outside, close-ups, and three frames of a detonation.
 
 ## 6. Threads and telemetry
 
@@ -496,7 +535,8 @@ Plugin smoke test (`rb_plugin_smoke`, the real `AudioProcessor`):
   * Oversampling lowers aliasing and switches click-free (largest step 0.041) while keeping the room's damage; the old tail fades over 1.2 s.
   * A sidechain key breaks the room while Input mode ignores it.
 * **Editor:** it builds and renders six snapshots after pumping audio through the plugin:
-  pristine, damaged, detonated, from behind, info column and engine page.
+  pristine, damaged, detonated, from behind, info column and engine page. It then poses the house
+  at set damage levels in every material for the gallery and times a repaint.
 
 Material personalities on the same script, with permadeath:
 

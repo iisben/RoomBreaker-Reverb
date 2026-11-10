@@ -150,6 +150,7 @@ public:
     void setTab (int t);
     rb::ui::InfoPanel& getInfoPanel() { return info; }
     rb::ui::HouseView& getHouse() { return structure.house; }
+    rb::ui::LiveState& getLive() { return live; }   // tests: pose the house at a set damage
     void advance (float seconds);   // tests: run the UI clock without a message loop timer
 
 private:

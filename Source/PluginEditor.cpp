@@ -124,10 +124,22 @@ void HistoryGraph::paint (juce::Graphics& g)
             g.fillRect (x - 0.5f, plot.getBottom() + 4.0f, 1.0f, 6.0f);
         }
     }
+    {
+        juce::Path area = integ;
+        area.lineTo (plot.getRight(), plot.getBottom());
+        area.lineTo (plot.getX(), plot.getBottom());
+        area.closeSubPath();
+        g.setGradientFill (juce::ColourGradient (C::text.withAlpha (0.13f), 0.0f, plot.getY(), C::text.withAlpha (0.0f), 0.0f, plot.getBottom(), false));
+        g.fillPath (area);
+    }
     g.setColour (C::hot.withAlpha (0.9f));
-    g.strokePath (stress, juce::PathStrokeType (1.3f));
-    g.setColour (C::text.withAlpha (0.9f));
-    g.strokePath (integ, juce::PathStrokeType (1.8f));
+    g.strokePath (stress, juce::PathStrokeType (1.3f, juce::PathStrokeType::curved));
+    g.setColour (C::text.withAlpha (0.92f));
+    g.strokePath (integ, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved));
+
+    g.setColour (C::hot.withAlpha (0.75f));
+    g.setFont (uiFont (10.5f, true));
+    g.drawText ("yield", (int) plot.getX() + 4, (int) yieldY - 14, 40, 12, juce::Justification::centredLeft);
 }
 
 StructureView::StructureView (LiveState& s, juce::AudioProcessorValueTreeState& apvts)
@@ -150,9 +162,8 @@ void StructureView::resized()
 
 void StructureView::refresh (float dt)
 {
-    house.tick (dt);
+    house.tick (dt);   // repaints itself when something changed
     survey.highlighted = house.hoveredWall();
-    house.repaint();
     survey.repaint();
     history.repaint();
 }
@@ -500,6 +511,7 @@ void InfoPanel::paintStatus (juce::Graphics& g, juce::Rectangle<float> r)
     drawParagraph (g, "Fine cracks: reflections start to scatter.\n"
                       "Bare brick or rebar: the wall is loose and rings at its own pitch.\n"
                       "Holes and missing tiles: sound leaks outside.\n"
+                      "A wall down to a stump: fully breached.\n"
                       "Flying debris: a fracture, heard as impact and rubble.",
                    r, uiFont (13.5f), C::dim, 5.0f);
 }

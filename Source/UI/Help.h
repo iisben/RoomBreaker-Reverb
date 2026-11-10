@@ -102,9 +102,11 @@ inline constexpr HelpEntry kHelp[] =
       "Oversampling, gains, the limiter and the stress source are left as they are." },
     { "monitor", "The house",
       "The room, drawn as a house. The four walls are North, South (the front door), East and West; the roof is the Ceiling and "
-      "the lawn is the Floor. Cracks start at the corners of doors and windows, the render falls away to show the material "
-      "underneath, holes open, glass breaks, tiles slip, the chimney leans and the house settles off level. Fractures throw "
-      "debris that stays on the lawn until the room heals or you press Rebuild. Walls tremble when loaded past yield. "
+      "the lawn is the Floor. Cracks start at the corners of doors and windows. Then each Material fails in its own way: "
+      "render spalls, tiles and panes drop one by one, stone leaves stepped edges, sheet metal tears. Holes show the wall's "
+      "thickness and the room inside, and past about 85 % damage a wall comes down from the top. Tiles slip, the chimney "
+      "leans, the lawn splits and the house settles off level. Rubble piles up at the foot of each wall until the room heals "
+      "or you press Rebuild. The light and the scenery follow Outside. Walls tremble when loaded past yield. "
       "Drag to turn the house, double-click to face it again, and hover a wall for its numbers." },
     { "survey", "Wall survey",
       "Each wall's integrity (how much is still standing) and its current load against the yield point: the tick marks yield, "
