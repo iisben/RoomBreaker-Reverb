@@ -6,7 +6,8 @@
 //
 // Checks: parameter layout, processBlock with random host block sizes, state
 // save/recall including structural damage, Manual Reset edge trigger, editor
-// construction + telemetry, and writes a PNG snapshot of the editor.
+// construction + telemetry, bypass, meters, the preset library, the knobs' mouse
+// and text entry, editor scaling, and writes PNG snapshots of the editor.
 //==============================================================================
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <juce_dsp/juce_dsp.h>
@@ -200,7 +201,8 @@ int main (int argc, char** argv)
         if (auto* withId = dynamic_cast<juce::AudioProcessorParameterWithID*> (param))
             std::printf ("    %-10s %-24s default: %s\n", withId->paramID.toRawUTF8(), param->getName (32).toRawUTF8(),
                          param->getText (param->getDefaultValue(), 32).toRawUTF8());
-    check (plugin->getParameters().size() == 28, "28 parameters (11 v1 + 17 v2)");
+    check (plugin->getParameters().size() == 29, "29 parameters (11 v1 + 17 v2 + bypass)");
+    check (plugin->getBypassParameter() == findParam (*plugin, "bypass"), "bypass parameter is exposed to the host");
     {
         auto* heal = findParam (*plugin, "heal");
         check (heal != nullptr && heal->getText (1.0f, 32) == "Permadeath", "Healing at max reads \"Permadeath\"");
@@ -560,6 +562,112 @@ int main (int argc, char** argv)
         check (inputOnly > 0.99f && keyed < 0.9f, "Sidechain source breaks the room from the key, Input source ignores it");
     }
 
+
+    //--------------------------------------------------------------------------
+    std::printf ("\n-- Bypass and meters --\n");
+    {
+        auto& rbp = dynamic_cast<RoomBreakerAudioProcessor&> (*plugin);
+        plugin->setCurrentProgram (findProgram (*plugin, "Default Bunker"));
+        setParam (*plugin, "mix", 0.6f);
+        juce::MidiBuffer midi;
+        auto sine = [] (juce::AudioBuffer<float>& b, int start)
+        {
+            for (int i = 0; i < b.getNumSamples(); ++i)
+            {
+                const float x = 0.25f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 440.0 * (double) (start + i) / 48000.0);
+                b.setSample (0, i, x);
+                b.setSample (1, i, -x);
+            }
+        };
+        int pos = 0;
+        for (int k = 0; k < 40; ++k) { juce::AudioBuffer<float> b (2, 480); sine (b, pos); plugin->processBlock (b, midi); pos += 480; }
+        check (rbp.inMeter[0].peak.load() > 0.2f && rbp.inMeter[1].peak.load() > 0.2f, "input meters see both channels");
+        check (rbp.outMeter[0].meanSquare.load() > 1.0e-4f, "output RMS follows the signal");
+
+        if (auto* b = findParam (*plugin, "bypass")) b->setValueNotifyingHost (1.0f);
+        float worstWhileFading = 0.0f, worstAfter = 0.0f;
+        for (int k = 0; k < 40; ++k)
+        {
+            juce::AudioBuffer<float> b (2, 480), dry (2, 480);
+            sine (b, pos);
+            dry.makeCopyOf (b);
+            plugin->processBlockBypassed (b, midi);   // what a host calls while its bypass is on
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < 480; ++i)
+                {
+                    const float d = std::abs (b.getSample (ch, i) - dry.getSample (ch, i));
+                    (k < 2 ? worstWhileFading : worstAfter) = std::max (k < 2 ? worstWhileFading : worstAfter, d);
+                }
+            pos += 480;
+        }
+        std::printf ("    bypassed: largest difference from the input %.2g (after the 20 ms fade)\n", (double) worstAfter);
+        check (worstAfter < 1.0e-6f, "bypassed output is the untouched input");
+        if (auto* b = findParam (*plugin, "bypass")) b->setValueNotifyingHost (0.0f);
+        bool fl = true;
+        pump (*plugin, 0.3, 0.2f, rng, fl);
+        check (fl, "un-bypassing fades back without non-finite output");
+    }
+
+    //--------------------------------------------------------------------------
+    std::printf ("\n-- Preset library --\n");
+    const auto userPresets = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("rb_smoke_presets");
+    {
+        auto& rbp = dynamic_cast<RoomBreakerAudioProcessor&> (*plugin);
+        auto& lib = rbp.presets;
+        userPresets.deleteRecursively();
+        lib.setUserFolder (userPresets);   // never the user's real folder
+        check (lib.size() == 28, "28 factory presets listed");
+
+        auto names = [&] (const std::vector<int>& idx)
+        {
+            juce::StringArray n;
+            for (int i : idx) n.add (lib.entry (i).name);
+            return n;
+        };
+        const auto glass = names (lib.search ("glass", {}, {}));
+        check (glass.size() >= 1 && glass[0] == "Glass Rain Collapse", "search finds by name, name matches first");
+        const auto perm = names (lib.search ({}, { "Permadeath" }, {}));
+        check (perm.size() == 3, "tag filter: 3 presets tagged Permadeath (" + perm.joinIntoString (", ") + ")");
+        check (lib.search ("dark tail", {}, {}).size() >= 2, "every word must match (name, tags, category or description)");
+        check (lib.search ({}, { "Drums", "Metallic" }, {}).size() == 2, "tags combine (Drums AND Metallic)");
+        check (lib.search ({}, {}, "Ambient").size() == 3, "category narrows to Ambient (3)");
+        bool everyTagKnown = true;
+        for (int i = 0; i < lib.size(); ++i)
+            for (const auto& t : lib.entry (i).tags)
+                everyTagKnown = everyTagKnown && rb::presetTagVocabulary().contains (t);
+        check (everyTagKnown, "every factory tag is in the vocabulary");
+
+        lib.load (lib.search ("Drowned Signal", {}, {})[0]);
+        check (lib.currentName() == "Drowned Signal" && plugin->getCurrentProgram() == findProgram (*plugin, "Drowned Signal"),
+               "loading a factory preset sets the host program");
+        check (! lib.isModified(), "a freshly loaded preset is not modified");
+        setParam (*plugin, "decay", 9.0f);
+        check (lib.isModified(), "moving a control marks it modified");
+        setParam (*plugin, "input", 3.0f);   // a global setting: never part of a preset
+
+        check (lib.saveUser ("Smoke Test Room", {}, { "Dark", "Long tail" }), "user preset saved");
+        check (userPresets.getChildFile ("Smoke Test Room.rbpreset").existsAsFile(), "file written as Smoke Test Room.rbpreset");
+        check (lib.size() == 29 && lib.currentName() == "Smoke Test Room" && ! lib.isModified(), "saved preset is listed and current");
+        check (lib.search ({}, {}, rb::PresetLibrary::kUserCategory).size() == 1
+               && lib.categories().contains (rb::PresetLibrary::kUserCategory), "user presets have their own category");
+
+        juce::MemoryBlock withUser;
+        plugin->getStateInformation (withUser);
+        lib.load (0);
+        check (std::abs (dynamic_cast<juce::RangedAudioParameter*> (findParam (*plugin, "decay"))->convertFrom0to1 (findParam (*plugin, "decay")->getValue()) - 2.8f) < 0.01f,
+               "factory preset replaced the decay");
+        lib.load (lib.search ("Smoke Test", {}, {})[0]);
+        auto* decay = dynamic_cast<juce::RangedAudioParameter*> (findParam (*plugin, "decay"));
+        check (std::abs (decay->convertFrom0to1 (decay->getValue()) - 9.0f) < 0.05f, "user preset brings its decay back");
+        auto* input = dynamic_cast<juce::RangedAudioParameter*> (findParam (*plugin, "input"));
+        check (std::abs (input->convertFrom0to1 (input->getValue()) - 3.0f) < 0.05f, "presets leave Input gain alone");
+
+        lib.load (0);
+        plugin->setStateInformation (withUser.getData(), (int) withUser.getSize());
+        check (lib.currentName() == "Smoke Test Room", "a session remembers it was using a user preset");
+        setParam (*plugin, "input", 0.0f);
+    }
+
     //--------------------------------------------------------------------------
     std::printf ("\n-- Editor --\n");
     {
@@ -731,16 +839,153 @@ int main (int argc, char** argv)
                 live.frame.integrity.fill (1.0f);
             }
 
-            ed->getInfoPanel().showHelpFor ("impact");
+            // Close-ups at 2x: as a high-density screen shows them.
+            auto detail = [&] (juce::Rectangle<int> area, const juce::String& fileName)
+            {
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+                const auto image = editor->createComponentSnapshot (area, true, 2.0f);
+                const auto png = outDir.getChildFile (fileName);
+                png.deleteFile();
+                juce::FileOutputStream stream (png);
+                if (stream.openedOk()) juce::PNGImageFormat().writeImageToStream (image, stream);
+            };
+            plugin->setCurrentProgram (findProgram (*plugin, "Glass Rain Collapse"));
+            play (1.0, 0.8f);
+            detail ({ 720, 48, 480, 670 }, "detail_controls.png");
+            detail ({ 300, 0, 900, 48 }, "detail_header.png");
+            detail ({ 0, 48, 96, 670 }, "detail_meter.png");
+
+            //------------------------------------------------------------------
+            std::printf ("\n-- Knobs --\n");
+            {
+                auto& controls = ed->getControls();
+                auto* decayKnob = controls.findKnob ("decay");
+                auto* hiCut = controls.findKnob ("highcut");
+                auto* pre = controls.findKnob ("predelay");
+                check (decayKnob != nullptr && hiCut != nullptr && pre != nullptr, "the knobs are where the layout says");
+
+                struct Gestures : juce::AudioProcessorListener
+                {
+                    int begun = 0, ended = 0;
+                    void audioProcessorParameterChanged (juce::AudioProcessor*, int, float) override {}
+                    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+                    void audioProcessorParameterChangeGestureBegin (juce::AudioProcessor*, int) override { ++begun; }
+                    void audioProcessorParameterChangeGestureEnd (juce::AudioProcessor*, int) override { ++ended; }
+                } gestures;
+                plugin->addListener (&gestures);
+
+                auto plain = [] (juce::RangedAudioParameter& p) { return p.convertFrom0to1 (p.getValue()); };
+                auto type = [&] (rb::ui::Knob& k, const juce::String& text)
+                {
+                    k.openValueEditor();
+                    juce::TextEditor* te = nullptr;
+                    for (auto* c : k.getChildren())
+                        if (auto* t = dynamic_cast<juce::TextEditor*> (c)) te = t;
+                    if (te == nullptr) return false;
+                    te->setText (text, false);
+                    te->onReturnKey();
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+                    return ! k.isEditingValue();
+                };
+                if (decayKnob != nullptr && hiCut != nullptr && pre != nullptr)
+                {
+                    check (type (*decayKnob, "4.5"), "double-click editor opens and closes on Return");
+                    check (std::abs (plain (decayKnob->getParameter()) - 4.5f) < 0.01f, "typed 4.5 -> Decay 4.50 s");
+                    type (*pre, "120 ms");
+                    check (std::abs (plain (pre->getParameter()) - 120.0f) < 0.5f, "typed \"120 ms\" -> Pre-delay 120 ms (units optional)");
+                    type (*hiCut, "4.5k");
+                    check (std::abs (plain (hiCut->getParameter()) - 4500.0f) < 5.0f, "typed \"4.5k\" -> High cut 4.50 kHz");
+                    type (*decayKnob, "loud");
+                    check (std::abs (plain (decayKnob->getParameter()) - 4.5f) < 0.01f, "nonsense text leaves the value alone");
+                    type (*decayKnob, "99");
+                    check (std::abs (plain (decayKnob->getParameter()) - 12.0f) < 0.01f, "typed values clamp to the range");
+
+                    auto wheel = [&] (rb::ui::Knob& k, float dy, bool smooth, juce::ModifierKeys mods)
+                    {
+                        juce::MouseWheelDetails w {};
+                        w.deltaY = dy; w.isSmooth = smooth;
+                        const juce::MouseEvent e (juce::Desktop::getInstance().getMainMouseSource(), { 40.0f, 40.0f }, mods, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+                                                  &k, &k, juce::Time::getCurrentTime(), { 40.0f, 40.0f }, juce::Time::getCurrentTime(), 1, false);
+                        k.mouseWheelMove (e, w);
+                    };
+                    decayKnob->resetToDefault();
+                    const double p0 = decayKnob->valueToProportionOfLength (decayKnob->getValue());
+                    wheel (*decayKnob, 0.1f, false, {});
+                    const double p1 = decayKnob->valueToProportionOfLength (decayKnob->getValue());
+                    wheel (*decayKnob, -0.1f, false, juce::ModifierKeys::shiftModifier);
+                    const double p2 = decayKnob->valueToProportionOfLength (decayKnob->getValue());
+                    std::printf ("    wheel notch %+.4f of the range, with Shift %+.4f\n", p1 - p0, p2 - p1);
+                    check (std::abs ((p1 - p0) - 0.02) < 1.0e-3 && std::abs ((p2 - p1) + 0.002) < 1.0e-3, "wheel: 2 % per notch, Shift 0.2 %");
+
+                    auto* yieldKnob = controls.findKnob ("yield");   // a 0.1 dB stepped parameter
+                    yieldKnob->resetToDefault();
+                    const double y0 = yieldKnob->getValue();
+                    for (int i = 0; i < 10; ++i) wheel (*yieldKnob, 0.1f, false, juce::ModifierKeys::shiftModifier);
+                    check (yieldKnob->getValue() > y0 + 0.5, "fine wheel steps add up on a stepped parameter");
+
+                    decayKnob->resetToDefault();
+                    check (std::abs (plain (decayKnob->getParameter()) - 2.8f) < 0.01f, "reset returns to the default");
+                    std::printf ("    host gestures: %d begun, %d ended\n", gestures.begun, gestures.ended);
+                    check (gestures.begun >= 18 && gestures.begun == gestures.ended, "every edit is one complete host gesture");
+                }
+                plugin->removeListener (&gestures);
+            }
+
+            //------------------------------------------------------------------
+            std::printf ("\n-- Scaling --\n");
+            {
+                auto& rbp = dynamic_cast<RoomBreakerAudioProcessor&> (*plugin);
+                ed->setScale (1.5f);
+                check (editor->getWidth() == 1800 && editor->getHeight() == 1125, "150 %: 1800 x 1125");
+                check (std::abs (ed->getCanvas().getTransform().mat00 - 1.5f) < 1.0e-4f && ed->getCanvas().getWidth() == 1200,
+                       "the canvas keeps its design size and is scaled as one");
+                juce::MemoryBlock st;
+                plugin->getStateInformation (st);
+                std::unique_ptr<juce::AudioProcessor> other (createPluginFilter());
+                other->setStateInformation (st.getData(), (int) st.getSize());
+                check (std::abs (dynamic_cast<RoomBreakerAudioProcessor&> (*other).editorScale.load() - 1.5f) < 1.0e-3f, "the size is saved with the session");
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (60);
+                const auto big = editor->createComponentSnapshot ({ 1080, 72, 720, 480 }, true, 1.0f);
+                juce::FileOutputStream stream (outDir.getChildFile ("detail_scale150.png").getFullPathName());
+                if (stream.openedOk()) juce::PNGImageFormat().writeImageToStream (big, stream);
+                ed->setScale (0.5f);
+                check (editor->getWidth() == 900, "sizes clamp at 75 % (" + juce::String (editor->getWidth()) + " x " + juce::String (editor->getHeight()) + ")");
+                ed->setScale (3.0f);
+                check (editor->getWidth() == 2400, "sizes clamp at 200 %");
+                ed->setScale (1.0f);
+                check (std::abs (rbp.editorScale.load() - 1.0f) < 1.0e-4f, "back to 100 %");
+            }
+
+            //------------------------------------------------------------------
+            std::printf ("\n-- Preset browser --\n");
+            {
+                auto& browser = ed->getBrowser();
+                plugin->setCurrentProgram (findProgram (*plugin, "Ash Cathedral"));
+                browser.open();
+                check (browser.isVisible(), "browser opens");
+                browser.setSearchText ("cathedral");
+                check (browser.getNumResults() == 2, "search \"cathedral\": 2 results");
+                browser.setSearchText ({});
+                browser.setTagSelected ("Dark", true);
+                const int dark = browser.getNumResults();
+                browser.setTagSelected ("Bass", true);
+                check (browser.getNumResults() < dark && browser.getNumResults() > 0, "tags narrow the list");
+                browser.setTagSelected ("Bass", false);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (40);
+                snap ("editor_browser.png");
+                browser.setTagSelected ("Dark", false);
+                browser.close();
+                check (! browser.isVisible(), "browser closes");
+            }
+
+            ed->getInfoPanel().showHelpFor ("decay");
             snap ("editor_info.png");
             ed->getInfoPanel().showHelpFor ({});
-            ed->setTab (1);
-            snap ("editor_engine.png");
-            ed->setTab (0);
         }
         plugin->editorBeingDeleted (editor.get());
     }
 
+    userPresets.deleteRecursively();
     plugin->releaseResources();
     std::printf ("\n%s (%d failure%s)\n", failures == 0 ? "ALL CHECKS PASSED" : "CHECKS FAILED", failures, failures == 1 ? "" : "s");
     return failures == 0 ? 0 : 1;

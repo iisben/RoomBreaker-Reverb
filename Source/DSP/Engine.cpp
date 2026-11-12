@@ -57,7 +57,6 @@ void Engine::prepare (double newSampleRate)
     preKeyL.prepare (preSamples);
     preKeyR.prepare (preSamples);
 
-    mixSmoother.setTime (0.03f, fs);
     debrisSmoother.setTime (0.05f, fs);
     sideLow.set (kMonoBassHz, fs);
     duckAtt = onePoleCoeff (0.004f, fs);
@@ -80,11 +79,11 @@ void Engine::reset()
     sideLow.reset();
 
     smoothedIntegrity.fill (1.0f);
-    sizeSmoothed = params.size;
+    sizeSmoothed = sizeStage = params.size;
     er.setGeometry (sizeSmoothed);
     shock = 0.0f;
     freezeSmoothed = params.freeze ? 1.0f : 0.0f;
-    predelayCur = predelayNext = std::max (2.0f, std::clamp (params.predelayMs, 0.0f, kMaxPredelayMs) * 1.0e-3f * fs);
+    predelayCur = predelayNext = std::max (2, (int) std::lround (std::clamp (params.predelayMs, 0.0f, kMaxPredelayMs) * 1.0e-3f * fs));
     predelayFade = predelayFadeInc = 0.0f;
     lowCutSm = std::clamp (params.lowCutHz, 10.0f, 2000.0f);
     highCutSm = std::clamp (params.highCutHz, 500.0f, 22000.0f);
@@ -104,7 +103,11 @@ void Engine::reset()
     duckGainShown = 1.0f;
     detonateRequested = false;
 
-    mixSmoother.reset (params.mix);
+    mixSm = clamp01 (params.mix);
+    wetMix = std::sin (mixSm * kHalfPi);
+    dryMix = std::cos (mixSm * kHalfPi);
+    wetMixInc = dryMixInc = 0.0f;
+    lowCutSet = highCutSet = -1.0f;
     debrisSmoother.reset (params.debrisLevel);
     flashAccumulator.fill (0.0f);
     samplesSincePublish = 0;
@@ -228,7 +231,10 @@ void Engine::controlTick() noexcept
         meanLoose += loosenessAmount (smoothedIntegrity[(size_t) w]) / (float) kNumWalls;
     }
 
-    sizeSmoothed = glide (sizeSmoothed, params.size, dt, kSizeTau);
+    // Two smoothers in a row: the glide starts and ends with no jump in speed. One alone starts at
+    // full speed, and since every delay line follows Size, that kink is heard as a tick.
+    sizeStage    = glide (sizeStage, params.size, dt, 0.5f * kSizeTau);
+    sizeSmoothed = glide (sizeSmoothed, sizeStage, dt, 0.5f * kSizeTau);
 
     // Fractures flex the room: the shock envelope jumps with the hit and relaxes.
     shock *= std::exp (-dt / kShockTau);
@@ -260,8 +266,8 @@ void Engine::controlTick() noexcept
     impact.update (dt, n, frozen ? 0.0f : meanLoose, stress.inputPeakEnvelope());
 
     // Pre-delay: when the target moves, crossfade from the current tap to the new one.
-    const float predelayTarget = std::max (2.0f, std::clamp (params.predelayMs, 0.0f, kMaxPredelayMs) * 1.0e-3f * fs);
-    if (predelayFadeInc == 0.0f && std::abs (predelayTarget - predelayCur) > 0.5f)
+    const int predelayTarget = std::max (2, (int) std::lround (std::clamp (params.predelayMs, 0.0f, kMaxPredelayMs) * 1.0e-3f * fs));
+    if (predelayFadeInc == 0.0f && predelayTarget != predelayCur)
     {
         predelayNext = predelayTarget;
         predelayFade = 0.0f;
@@ -273,8 +279,24 @@ void Engine::controlTick() noexcept
     const float cutA  = std::exp (-dt / kCutoffTau);
     lowCutSm  = std::clamp (params.lowCutHz, 10.0f, 2000.0f)    * std::pow (lowCutSm  / std::clamp (params.lowCutHz, 10.0f, 2000.0f), cutA);
     highCutSm = std::clamp (params.highCutHz, 500.0f, 22000.0f) * std::pow (highCutSm / std::clamp (params.highCutHz, 500.0f, 22000.0f), cutA);
-    lowCutL.set (lowCutSm, 0.7071f, fs);   lowCutR.set (lowCutSm, 0.7071f, fs);
-    highCutL.set (std::min (highCutSm, 0.45f * fs), 0.7071f, fs); highCutR.set (std::min (highCutSm, 0.45f * fs), 0.7071f, fs);
+    if (std::abs (lowCutSm - lowCutSet) > 1.0e-4f * lowCutSm)       // the tan() is only paid while a cutoff moves
+    {
+        lowCutSet = lowCutSm;
+        lowCutL.set (lowCutSm, 0.7071f, fs);
+        lowCutR.set (lowCutSm, 0.7071f, fs);
+    }
+    if (std::abs (highCutSm - highCutSet) > 1.0e-4f * highCutSm)
+    {
+        highCutSet = highCutSm;
+        highCutL.set (std::min (highCutSm, 0.45f * fs), 0.7071f, fs);
+        highCutR.set (std::min (highCutSm, 0.45f * fs), 0.7071f, fs);
+    }
+
+    // Mix: glide the amount, take the equal-power gains once per tick, ramp them per sample.
+    mixSm = clamp01 (params.mix) + std::exp (-dt / 0.03f) * (mixSm - clamp01 (params.mix));
+    if (std::abs (mixSm - clamp01 (params.mix)) < 1.0e-5f) mixSm = clamp01 (params.mix);
+    wetMixInc = (std::sin (mixSm * kHalfPi) - wetMix) * invN;
+    dryMixInc = (std::cos (mixSm * kHalfPi) - dryMix) * invN;
 
     driveAmt = clamp01 (params.drive) + toneA * (driveAmt - clamp01 (params.drive));
     if (driveAmt < 1.0e-5f) driveAmt = 0.0f;
@@ -381,7 +403,6 @@ void Engine::renderSlice (float* L, float* R, const float* keyL, const float* ke
     for (int i = 0; i < n; ++i)
     {
         const size_t s = (size_t) i;
-        const float mix = mixSmoother.process (params.mix);
         const float deb = debrisSmoother.process (params.debrisLevel);
 
         float wetL = kErWet * erL[s] + kTankWet * tankL[s] + kExteriorWet * extL[s] + kDebrisWet * deb * debL[s] + kImpactWet * impL[s];
@@ -418,12 +439,13 @@ void Engine::renderSlice (float* L, float* R, const float* keyL, const float* ke
         if (duckAmt > 1.0e-5f)
             duckGain = 1.0f - 0.9f * duckAmt * clamp01 ((gainToDb (duckEnv) + 40.0f) / 30.0f);
 
-        const float wetGain = std::sin (mix * kHalfPi) * duckGain;
+        wetMix += wetMixInc;
+        dryMix += dryMixInc;
+        const float wetGain = wetMix * duckGain;
         if (mixDry)
         {
-            const float dryGain = std::cos (mix * kHalfPi);
-            L[i] = dryGain * L[i] + wetGain * wetL;
-            R[i] = dryGain * R[i] + wetGain * wetR;
+            L[i] = dryMix * L[i] + wetGain * wetL;
+            R[i] = dryMix * R[i] + wetGain * wetR;
         }
         else
         {

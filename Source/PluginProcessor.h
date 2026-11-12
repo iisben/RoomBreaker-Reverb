@@ -4,6 +4,7 @@
 #include "Parameters.h"
 #include "DSP/Engine.h"
 #include "DSP/Telemetry.h"
+#include "PresetLibrary.h"
 
 //==============================================================================
 /** Signal flow at the host rate:
@@ -28,7 +29,10 @@ public:
     void releaseResources() override {}
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    /** Hosts call this while their bypass is on. It runs the same path, which crossfades to the input. */
+    void processBlockBypassed (juce::AudioBuffer<float>& b, juce::MidiBuffer& m) override { processBlock (b, m); }
     using AudioProcessor::processBlock;
+    juce::AudioProcessorParameter* getBypassParameter() const override { return apvts.getParameter (rb::ids::bypass); }
 
     //==============================================================================
     juce::AudioProcessorEditor* createEditor() override;
@@ -44,6 +48,8 @@ public:
     int getNumPrograms() override;
     int getCurrentProgram() override { return currentProgram; }
     void setCurrentProgram (int index) override;   // sets every sound parameter + rebuilds the room
+    /** Sets every preset parameter (plain values, kPresetParamIds order) and rebuilds the room from `start`. */
+    void applyPresetValues (const std::array<float, rb::kNumPresetParams>& plain, const rb::dsp::WallArray& start);
     const juce::String getProgramName (int index) override;
     void changeProgramName (int, const juce::String&) override {}
 
@@ -60,6 +66,16 @@ public:
     std::atomic<bool>  sidechainConnected { false };
     std::atomic<int>   activeFactor { 1 };
     std::atomic<int>   detonateCount { 0 };
+
+    /** Stereo meters. Peaks are held until the UI takes them (exchange with 0); the mean square
+        is smoothed over ~300 ms on the audio thread. Input is after Input gain, output is final. */
+    struct MeterChannel { std::atomic<float> peak { 0.0f }, meanSquare { 0.0f }; };
+    std::array<MeterChannel, 2> inMeter, outMeter;
+
+    /** Editor size as a multiple of its design size, saved with the session. */
+    std::atomic<float> editorScale { 1.0f };
+
+    rb::PresetLibrary presets { *this };
     float getCpuLoad() const { return (float) loadMeasurer.getLoadAsProportion(); }
     double getHostSampleRate() const { return hostRate; }
 
@@ -79,7 +95,10 @@ private:
     int maxChunk = 512;
     double hostRate = 48000.0;
 
-    juce::SmoothedValue<float> inGain, outGain, dryGain;
+    juce::SmoothedValue<float> inGain, outGain, dryGain, bypassMix;
+    juce::AudioBuffer<float> engineInBuf;
+    std::vector<float> bypassRamp;
+    std::array<float, 2> inMs {}, outMs {};
     bool lastResetState = false, lastDetonateState = false;
     int currentProgram = 0;
     juce::AudioProcessLoadMeasurer loadMeasurer;

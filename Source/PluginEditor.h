@@ -1,4 +1,24 @@
 #pragma once
+//==============================================================================
+// The editor: one console, laid out at 1200 x 750 design units on an 8 px grid and
+// scaled as a whole (75 % to 200 %, aspect ratio locked).
+//
+//   +--------------------------------------------------------------------------+
+//   | ROOMBREAKER       [<][>]  Preset name ......... CATEGORY  [save]  100% [o] |  header   48
+//   +-----+------------------------------------+-------------------------+-----+
+//   | IN  |                                    | ROOM  Material  Outside | OUT |
+//   | ||  |   the house                        | STRUCTURE   o  o  o  o  | ||  |
+//   | ||  |   (condition readout top-left)     | DESTRUCTION o  o  o  o  | ||  |
+//   | ||  |                                    | SPACE       o  o  o  o  | MIX |
+//   | IN  |                                    | TONE        o  o  o  o  | DUCK|
+//   | BRK |                                    | [FREEZE][REBUILD][DET.] | OUT |
+//   +-----+------------------------------------+-------------------------+-----+
+//   | info line (what the mouse is over)        OVERSAMPLING [1x 2x 4x] LIMITER |  footer   32
+//   +--------------------------------------------------------------------------+
+//      88                 624                            392              88
+//
+// Level flows left to right: input rail, the room, the controls, output rail.
+//==============================================================================
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "PluginProcessor.h"
 #include "UI/Theme.h"
@@ -6,133 +26,151 @@
 #include "UI/Help.h"
 #include "UI/LiveState.h"
 #include "UI/HouseView.h"
+#include "UI/PresetBrowser.h"
 
 namespace rb::ui
 {
 //==============================================================================
-/** Six columns under the house: how much of each wall stands, and its load against yield. */
-class WallSurvey : public juce::Component
+/** The footer's info line: help for whatever the mouse is over, otherwise how the knobs work. */
+class InfoLine : public juce::Component, private juce::Timer
 {
 public:
-    explicit WallSurvey (const LiveState& s) : live (s) { setInfo (*this, "survey"); }
+    InfoLine();
     void paint (juce::Graphics&) override;
-    int highlighted = -1;
+
+    // Registered on the canvas for all nested children.
+    void mouseEnter (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
+
+    juce::String currentKey() const { return key; }
+    void showHelpFor (const juce::String& k) { key = k; clearAt = 0; repaint(); }
+
+private:
+    void timerCallback() override;
+    juce::String key;
+    juce::uint32 clearAt = 0;
+};
+
+//==============================================================================
+/** Drawn over the house: the condition readout, the hovered surface, the turn hint, bypass. */
+class DisplayOverlay : public juce::Component
+{
+public:
+    DisplayOverlay (const LiveState&, const HouseView&, RoomBreakerAudioProcessor&);
+    void paint (juce::Graphics&) override;
+    void refresh();
+    juce::Rectangle<float> readoutBounds() const { return { 12.0f, 12.0f, 212.0f, 84.0f }; }
 
 private:
     const LiveState& live;
+    const HouseView& house;
+    RoomBreakerAudioProcessor& proc;
+    juce::uint64 shown = 0;
 };
 
-class HistoryGraph : public juce::Component
+/** The house in its frame. */
+class Display : public juce::Component
 {
 public:
-    explicit HistoryGraph (const LiveState& s) : live (s) { setInfo (*this, "history"); }
-    void paint (juce::Graphics&) override;
-
-private:
-    const LiveState& live;
-};
-
-/** Left column of the ROOM page. */
-class StructureView : public juce::Component
-{
-public:
-    StructureView (LiveState&, juce::AudioProcessorValueTreeState&);
+    Display (LiveState&, RoomBreakerAudioProcessor&);
     void resized() override;
-    void paint (juce::Graphics&) override;
+    void paintOverChildren (juce::Graphics&) override;
     void refresh (float dt);
 
     HouseView house;
 
 private:
-    WallSurvey survey;
-    HistoryGraph history;
+    DisplayOverlay overlay;
+    juce::Component readoutTarget;   // gives the readout its own help text
 };
 
 //==============================================================================
-/** Middle column of the ROOM page: material, outside, and the 16 sound controls. */
-class RoomPanel : public juce::Component
+/** The sound controls: room, four sections of four knobs, and the three actions. */
+class ControlPanel : public juce::Component
 {
 public:
-    explicit RoomPanel (RoomBreakerAudioProcessor&);
+    explicit ControlPanel (RoomBreakerAudioProcessor&);
     void paint (juce::Graphics&) override;
     void resized() override;
+    Knob* findKnob (const juce::String& paramId) const;
 
 private:
-    RoomBreakerAudioProcessor& proc;
-    ChoiceBox material, voidType;
-    std::vector<std::unique_ptr<Knob>> knobs;
+    ChoiceBox material, outside;
+    juce::OwnedArray<Knob> knobs;   // 4 x 4, in section order
+    ToggleBox freeze;
+    ActionButton rebuild, detonate;
 };
 
-//==============================================================================
-/** ENGINE page: a plain settings sheet. */
-class EnginePage : public juce::Component
+/** An edge column: a stereo meter and the controls that belong at that end of the signal. */
+class Rail : public juce::Component
 {
 public:
-    EnginePage (RoomBreakerAudioProcessor&, const LiveState&);
+    Rail (RoomBreakerAudioProcessor&, bool isInput);
     void paint (juce::Graphics&) override;
     void resized() override;
+    void tick (float dt) { meter.tick (dt); }
+    StereoMeter& getMeter() noexcept { return meter; }
 
 private:
-    RoomBreakerAudioProcessor& proc;
-    const LiveState& live;
-    Segmented oversampling, stressSource;
-    Knob duck;
-    Chip limiter;
+    bool input;
+    StereoMeter meter;
+    juce::OwnedArray<Knob> knobs;
+    std::unique_ptr<Segmented> breakBy;
 };
 
 //==============================================================================
-/** Right column, on every page: explains the control under the mouse, or shows the room's status. */
-class InfoPanel : public juce::Component, private juce::Timer
-{
-public:
-    InfoPanel (RoomBreakerAudioProcessor&, const LiveState&);
-    void paint (juce::Graphics&) override;
-
-    // Registered on the editor's root for all nested children.
-    void mouseEnter (const juce::MouseEvent&) override;
-    void mouseExit (const juce::MouseEvent&) override;
-
-    juce::String currentKey() const { return hoverKey; }
-    void showHelpFor (const juce::String& key) { hoverKey = key; clearAt = 0; repaint(); }
-
-private:
-    void timerCallback() override;
-    void paintHelp (juce::Graphics&, juce::Rectangle<float>);
-    void paintStatus (juce::Graphics&, juce::Rectangle<float>);
-
-    RoomBreakerAudioProcessor& proc;
-    const LiveState& live;
-    juce::String hoverKey;
-    juce::uint32 clearAt = 0;
-};
-
-//==============================================================================
-/** Top bar: name + pages, presets + DETONATE / Rebuild, gains, oversampling + freeze, status and meters. */
+/** Wordmark, the preset bar, interface size and bypass. */
 class Header : public juce::Component
 {
 public:
-    Header (RoomBreakerAudioProcessor&, const LiveState&);
+    Header (RoomBreakerAudioProcessor&);
     void paint (juce::Graphics&) override;
     void resized() override;
-    void refreshPreset();
     void tick();
-    std::function<void (int)> onTab;
-    void setTab (int t);
+
+    std::function<void()> onBrowse, onSave;
+    std::function<void (float)> onScale;
+    void setBrowserOpen (bool);
 
 private:
-    void loadPreset (int index);
+    class PresetName;
+    void step (int delta);
+    void showScaleMenu();
 
     RoomBreakerAudioProcessor& proc;
-    const LiveState& live;
-    juce::ComboBox presets;
-    juce::TextButton prevB { juce::String::fromUTF8 ("\xe2\x80\xb9") }, nextB { juce::String::fromUTF8 ("\xe2\x80\xba") };
-    MomentaryButton detonateB, rebuildB;
-    Knob input, mix, output;
+    IconButton prev { Icon::prev, "Previous preset" }, next { Icon::next, "Next preset" },
+               save { Icon::save, "Save preset" }, power { Icon::power, "Bypass" };
+    std::unique_ptr<PresetName> name;
+    juce::TextButton scale;
+    juce::ParameterAttachment bypass;
+    bool bypassed = false;
+};
+
+/** Info line, oversampling, limiter, engine status. */
+class Footer : public juce::Component
+{
+public:
+    explicit Footer (RoomBreakerAudioProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void tick();
+
+    InfoLine info;
+
+private:
+    RoomBreakerAudioProcessor& proc;
     Segmented oversampling;
-    Chip freeze;
-    std::array<juce::TextButton, 2> tabs;
-    juce::Component statusArea, meterArea;
-    int shownProgram = -2, lastDetonate = 0, detonateGlow = 0;
+    ToggleBox limiter;
+    juce::Component statusTarget;
+    juce::String status;
+    float cpu = 0.0f;
+};
+
+/** Everything, at design size. The editor scales this one component. */
+class Canvas : public juce::Component
+{
+public:
+    void paint (juce::Graphics&) override;
 };
 } // namespace rb::ui
 
@@ -146,12 +184,20 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
 
-    static constexpr int kW = 1280, kH = 800, kHeaderH = 84;
-    void setTab (int t);
-    rb::ui::InfoPanel& getInfoPanel() { return info; }
-    rb::ui::HouseView& getHouse() { return structure.house; }
-    rb::ui::LiveState& getLive() { return live; }   // tests: pose the house at a set damage
-    void advance (float seconds);   // tests: run the UI clock without a message loop timer
+    static constexpr int kW = rb::ui::kDesignW, kH = rb::ui::kDesignH;
+    static constexpr float kMinScale = 0.75f, kMaxScale = 2.0f;
+    /** Resizes the window to a multiple of the design size. */
+    void setScale (float);
+    float getScale() const noexcept { return scale; }
+
+    // tests
+    rb::ui::InfoLine& getInfoPanel() { return footer.info; }
+    rb::ui::HouseView& getHouse() { return display.house; }
+    rb::ui::LiveState& getLive() { return live; }
+    rb::ui::PresetBrowser& getBrowser() { return browser; }
+    rb::ui::ControlPanel& getControls() { return controls; }
+    juce::Component& getCanvas() { return canvas; }
+    void advance (float seconds);   // run the UI clock without a message loop timer
 
 private:
     void timerCallback() override;
@@ -159,14 +205,16 @@ private:
     RoomBreakerAudioProcessor& audioProcessor;
     rb::ui::LnF lnf;
     rb::ui::LiveState live;
-    juce::Component root;
+    rb::ui::Canvas canvas;
     rb::ui::Header header;
-    rb::ui::StructureView structure;
-    rb::ui::RoomPanel roomPanel;
-    rb::ui::EnginePage enginePage;
-    rb::ui::InfoPanel info;
-    juce::TooltipWindow tooltips { this, 700 };
-    int tab = 0;
+    rb::ui::Rail inRail, outRail;
+    rb::ui::Display display;
+    rb::ui::ControlPanel controls;
+    rb::ui::Footer footer;
+    rb::ui::PresetBrowser browser;
+    float scale = 1.0f;
+    bool sizeReady = false;
+    int frame = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RoomBreakerAudioProcessorEditor)
 };

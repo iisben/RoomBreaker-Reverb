@@ -196,8 +196,62 @@ const std::vector<FactoryPreset>& getFactoryPresets()
         for (const auto& e : kFx)
             if (std::string_view (p.name) == e.name)
                 p.fx = e.fx;
+
+    // Tags for the preset browser: what it is for, how it behaves, how it sounds.
+    struct Tags { const char* name; const char* tags; };
+    static const Tags kTags[] =
+    {
+        { "Default Bunker",              "Drums,Self-healing" },
+        { "Vocal Plate (Unbreakable)",   "Vocals,Unbreakable,Bright" },
+        { "Ceramic Bathroom",            "Vocals,Drums,Short,Self-healing,Bright" },
+        { "Drum Room - Hairline Cracks", "Drums,Short,Self-healing" },
+        { "Snare Shatter Chamber",       "Drums,Fragile,Bright,Wide" },
+        { "Breathing Bunker",            "Drums,Self-healing" },
+        { "Gunshot Bunker",              "Drums,Sound FX,Short" },
+        { "Sub-Bass Silo Groan",         "Bass,Metallic" },
+        { "Underground Dub Bunker",      "Bass,Long tail,Dark" },
+        { "Trailer Hit Demolition",      "Sound FX,Drums,Long tail,Wide" },
+        { "Collapse to Open Sky",        "Sound FX,Fragile,Permadeath" },
+        { "Earthquake Room",             "Bass,Sound FX,Metallic" },
+        { "Bombed Cathedral",            "Keys & Pads,Vocals,Starts ruined,Long tail,Wide" },
+        { "Haunted Silo",                "Keys & Pads,Starts ruined,Metallic,Long tail" },
+        { "Infinite Void Drone",         "Keys & Pads,Starts ruined,Long tail,Wide" },
+        { "Tin Shed Rattle",             "Sound FX,Drums,Metallic,Short,Self-healing" },
+        { "Slow Erosion (Permadeath)",   "Keys & Pads,Permadeath" },
+        { "Lopsided Vault",              "Sound FX,Fragile,Wide" },
+        { "Ash Cathedral",               "Keys & Pads,Vocals,Starts ruined,Dark,Long tail" },
+        { "Hangar Bass Dread",           "Bass,Gritty,Metallic,Dark" },
+        { "Monolith Footsteps",          "Drums,Dark,Long tail" },
+        { "Drowned Signal",              "Sound FX,Dark,Metallic" },
+        { "Glass Rain Collapse",         "Sound FX,Fragile,Bright,Wide" },
+        { "Black Ice Requiem",           "Keys & Pads,Starts ruined,Long tail,Wide" },
+        { "Tunnel Pressure Wave",        "Drums,Metallic,Gritty" },
+        { "Burning Rafters",             "Sound FX,Gritty,Dark" },
+        { "Sub Collapse Sequence",       "Bass,Permadeath,Dark" },
+        { "Dread Engine Room",           "Keys & Pads,Starts ruined,Gritty,Metallic" },
+    };
+    for (auto& p : v)
+        for (const auto& t : kTags)
+            if (std::string_view (p.name) == t.name)
+                p.tags = t.tags;
     return v;
     }();
     return presets;
+}
+
+std::array<float, kNumPresetParams> plainValues (const FactoryPreset& p)
+{
+    return { (float) p.material, p.yieldDb, p.bias, p.asymmetry, (float) p.voidType, p.healSeconds, p.size,
+             p.decaySeconds, p.debris, p.mix, p.fx.impact, p.fx.rumble, p.fx.predelay, p.fx.density, p.fx.motion,
+             p.fx.drive, p.fx.lowCut, p.fx.highCut, p.fx.width, p.fx.duck };
+}
+
+const juce::StringArray& presetTagVocabulary()
+{
+    static const juce::StringArray tags {
+        "Vocals", "Drums", "Bass", "Keys & Pads", "Sound FX",                      // use
+        "Unbreakable", "Fragile", "Self-healing", "Permadeath", "Starts ruined",    // behaviour
+        "Short", "Long tail", "Dark", "Bright", "Metallic", "Gritty", "Wide" };    // sound
+    return tags;
 }
 } // namespace rb

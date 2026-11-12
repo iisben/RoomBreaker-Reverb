@@ -498,6 +498,46 @@ bool HouseView::inFront (V3 p) const noexcept
     return true;
 }
 
+juce::Point<float> HouseView::wallAnchor (int wall) const noexcept
+{
+    if (wall < 4)
+    {
+        const auto& def = kWalls[wall];
+        return toScreen (houseToWorld (def.o + def.u * (0.5f * def.uLen) + V3 { 0, 0, 1.05f }));
+    }
+    if (wall == dsp::Ceiling)
+    {
+        const float x = std::sin (yaw) > 0.0f ? 0.7f : -0.7f;   // on the slope that faces the viewer
+        return toScreen (houseToWorld ({ x, -0.1f, roofTopZ (x) }));
+    }
+    // the lawn in front of the house, towards the viewer
+    return toScreen ({ juce::jlimit (-1.9f, 1.9f, 2.0f * std::sin (yaw)), juce::jlimit (-1.8f, 1.8f, kHouseY - 2.0f * std::cos (yaw)), 0.0f });
+}
+
+bool HouseView::wallFacesViewer (int wall) const noexcept
+{
+    return wall >= 4 || dot (houseDir (kWalls[wall].n), toCamera()) > 0.0f;
+}
+
+juce::Range<float> HouseView::plotSpan() const noexcept
+{
+    float lo = 1.0e9f, hi = -1.0e9f;
+    for (float x : { -kSlabX, kSlabX })
+        for (float y : { -kSlabY, kSlabY })
+        {
+            const float sx = toScreen ({ x, y, 0.0f }).x - shake.x;
+            lo = std::min (lo, sx);
+            hi = std::max (hi, sx);
+        }
+    return { lo, hi };
+}
+
+juce::Point<float> HouseView::northOnScreen() const noexcept
+{
+    const P2 north = toScreen ({ 0, 1, 0 }) - toScreen ({ 0, 0, 0 });
+    return north / std::max (0.001f, std::hypot (north.x, north.y));
+}
+
 float HouseView::damageOf (int wall) const noexcept
 {
     return 1.0f - juce::jlimit (0.0f, 1.0f, live.frame.integrity[(size_t) wall]);

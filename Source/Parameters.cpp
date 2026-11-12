@@ -174,6 +174,10 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
     engineGroup->addChild (std::make_unique<AudioParameterChoice> (
         ParameterID { ids::oversampling, 2 }, "Oversampling", StringArray { "Off", "2x", "4x" }, 1));
 
+    // v3. The host's bypass switch (getBypassParameter): a 20 ms crossfade to the untouched input.
+    engineGroup->addChild (std::make_unique<AudioParameterBool> (
+        ParameterID { ids::bypass, 3 }, "Bypass", false));
+
     layout.add (std::move (structure), std::move (space), std::move (destruction), std::move (space2),
                 std::move (tone), std::move (engineGroup));
     return layout;
@@ -208,11 +212,12 @@ ParameterCache::ParameterCache (AudioProcessorValueTreeState& s)
       outputGain (s.getRawParameterValue (ids::outputGain)),
       limiter   (s.getRawParameterValue (ids::limiter)),
       oversampling (s.getRawParameterValue (ids::oversampling)),
-      stressSource (s.getRawParameterValue (ids::stressSource))
+      stressSource (s.getRawParameterValue (ids::stressSource)),
+      bypass    (s.getRawParameterValue (ids::bypass))
 {
     jassert (material && yield && bias && asymmetry && voidType && heal && size && decay && debris && mix && reset);
     jassert (impact && rumble && predelay && density && motion && freeze && detonate && drive && lowCut && highCut
-             && width && duck && inputGain && outputGain && limiter && oversampling && stressSource);
+             && width && duck && inputGain && outputGain && limiter && oversampling && stressSource && bypass);
 }
 
 dsp::EngineParams ParameterCache::snapshot() const noexcept

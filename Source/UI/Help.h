@@ -1,6 +1,6 @@
 #pragma once
 //==============================================================================
-// Text for the INFO panel. Keyed by parameter ID, plus a few non-parameter keys
+// Text for the info line in the footer. Keyed by parameter ID, plus a few non-parameter keys
 // for the buttons and displays. Every control sets its key as the "info" property.
 //==============================================================================
 #include <juce_core/juce_core.h>
@@ -18,7 +18,7 @@ inline constexpr HelpEntry kHelp[] =
 {
     { "material", "Material",
       "What the walls are made of. Sets strength, how brittle they are, how fast they fatigue, how loose slabs ring, "
-      "and the sound of the impact, debris and rubble. The room status (move the mouse off the controls) describes the current one." },
+      "and the sound of the impact, debris and rubble. The house is drawn in the same material." },
     { "voidType", "Exterior Void",
       "What is outside the walls. When a wall breaches, sound escapes into this space. Free Field Loss throws it away, "
       "so a broken room gets drier. The others collect it into a tail of their own: a hall, a tunnel, an abyss, a burning city, "
@@ -97,27 +97,30 @@ inline constexpr HelpEntry kHelp[] =
     { "stresssrc", "Stress Source",
       "What breaks the walls. Input: the signal being reverberated. Sidechain: another track (a kick, say) breaks the room "
       "while you hear the reverb of this one. Input + Sidechain: both together." },
-    { "preset", "Preset",
-      "28 factory rooms in 7 categories. Loading one sets every sound control and rebuilds the room; some presets start as ruins. "
-      "Oversampling, gains, the limiter and the stress source are left as they are." },
-    { "monitor", "The house",
-      "The room, drawn as a house. The four walls are North, South (the front door), East and West; the roof is the Ceiling and "
-      "the lawn is the Floor. Cracks start at the corners of doors and windows. Then each Material fails in its own way: "
-      "render spalls, tiles and panes drop one by one, stone leaves stepped edges, sheet metal tears. Holes show the wall's "
-      "thickness and the room inside, and past about 85 % damage a wall comes down from the top. Tiles slip, the chimney "
-      "leans, the lawn splits and the house settles off level. Rubble piles up at the foot of each wall until the room heals "
-      "or you press Rebuild. The light and the scenery follow Outside. Walls tremble when loaded past yield. "
-      "Drag to turn the house, double-click to face it again, and hover a wall for its numbers." },
-    { "survey", "Wall survey",
-      "Each wall's integrity (how much is still standing) and its current load against the yield point: the tick marks yield, "
-      "so a bar past the tick is doing damage right now." },
-    { "history", "Last 12 seconds",
-      "Average integrity (light line), peak load (orange, with the yield level dashed) and fractures (ticks along the bottom)." },
-    { "meters", "Level Meters",
-      "Peak input (after Input Gain) and output, in dBFS." },
-    { "status", "Engine Status",
-      "Session sample rate, the rate the room engine runs at, the plugin's share of the audio thread's time budget, and "
-      "whether a sidechain is connected." },
+    { "preset", "Presets",
+      "Click the name to browse: search by name, tag or description, narrow by category and tags, and each preset loads as you "
+      "select it. Arrows step through all presets. A dot before the name means a control has moved since it was loaded. "
+      "Presets change the sound only: gains, oversampling, the limiter and the stress source stay as they are." },
+    { "presetFolder", "Presets Folder",
+      "Opens the folder your own presets are saved in (.rbpreset files). Copy files in or out to share them; the browser "
+      "picks them up the next time it opens." },
+    { "monitor", "The House",
+      "The room, drawn as a house: four walls (South has the door), the roof is the ceiling and the lawn is the floor. Cracks, "
+      "spalling, holes and collapse follow the Material; the sky follows Outside. Drag to turn it, double-click to face it again, "
+      "and hover a surface to read its condition." },
+    { "condition", "Condition",
+      "How much of the room is standing, and each surface on its own: North, South, East, West, Roof, Floor. The tick on each bar "
+      "is its load against the yield threshold: past the end of the bar it is taking damage now." },
+    { "meters", "Meters",
+      "Stereo peak (light) and RMS (solid) from -60 to +6 dBFS, with a 1.5 s peak hold. Input is measured after Input gain, "
+      "output after the limiter. The number is the highest peak so far and turns red at 0 dBFS. Click a meter to reset it." },
+    { "bypass", "Bypass",
+      "Fades to the untouched input over 20 ms. The room stops listening while bypassed, so it neither rings on nor breaks. "
+      "This is the same switch as the host's bypass." },
+    { "scale", "Interface Size",
+      "Sets the size of the window, from 75 % to 200 %. You can also drag the corner. The size is saved with the session." },
+    { "status", "Engine",
+      "Session sample rate, the rate the room engine runs at, and the plug-in's share of the audio thread's time budget." },
 };
 
 inline const HelpEntry* findHelp (const juce::String& key)

@@ -1,684 +1,614 @@
 #include "PluginEditor.h"
-#include "Presets.h"
 
 using namespace rb;
 using namespace rb::ui;
 
 namespace
 {
-    /** Word-wrapped paragraph; returns the height it used. */
-    float drawParagraph (juce::Graphics& g, const juce::String& text, juce::Rectangle<float> r,
-                         const juce::Font& font, juce::Colour colour, float lineSpacing = 3.0f)
-    {
-        juce::AttributedString a;
-        a.setWordWrap (juce::AttributedString::byWord);
-        a.setJustification (juce::Justification::topLeft);
-        a.setLineSpacing (lineSpacing);
-        a.append (text, font, colour);
-        juce::TextLayout layout;
-        layout.createLayout (a, r.getWidth());
-        layout.draw (g, r.withHeight (std::min (layout.getHeight(), r.getHeight())));
-        return layout.getHeight();
-    }
+    // Layout, in design units (1200 x 750). See the diagram in PluginEditor.h.
+    constexpr int kHeaderH = 48, kFooterH = 32, kRailW = 88, kPanelW = 392;
+    constexpr int kBodyY = kHeaderH, kBodyH = kDesignH - kHeaderH - kFooterH;
+    constexpr int kPanelX = kDesignW - kRailW - kPanelW;
+    const juce::Rectangle<int> kDisplayArea { kRailW + 8, kBodyY + 8, kPanelX - kRailW - 16, kBodyH - 16 };
 
     juce::String infoKeyFor (juce::Component* c)
     {
         for (; c != nullptr; c = c->getParentComponent())
-            if (c->getProperties().contains ("info"))
-                return c->getProperties()["info"].toString();
+            if (const auto* v = c->getProperties().getVarPointer ("info"))
+                return v->toString();
         return {};
     }
 
-    const char* kWallNames[] = { "North", "South", "East", "West", "Roof", "Floor" };
+    juce::Colour stateColour (float I)
+    {
+        return I >= 0.97f ? C::text1 : I >= 0.45f ? C::accent : C::danger;
+    }
 
-    juce::String percent (float v) { return juce::String (juce::roundToInt (v * 100.0f)) + "%"; }
+    const char* kSurfaceLetters[] = { "N", "S", "E", "W", "R", "F" };
+    const char* kSurfaceNames[]   = { "North wall", "South wall", "East wall", "West wall", "Roof", "Floor" };
 }
 
 //==============================================================================
-// Under the house
+// Info line
 //==============================================================================
-void WallSurvey::paint (juce::Graphics& g)
-{
-    g.fillAll (C::bg);
-    g.setColour (C::line);
-    g.drawHorizontalLine (0, 0.0f, (float) getWidth());
-
-    const auto& f = live.frame;
-    const float w = (float) (getWidth() - 40) / 6.0f;
-    for (int i = 0; i < 6; ++i)
-    {
-        const float x = 20.0f + (float) i * w;
-        const float I = f.integrity[(size_t) i], s = f.stressRatio[(size_t) i];
-        const bool hl = highlighted == i;
-
-        g.setColour (hl ? C::text : C::dim);
-        g.setFont (uiFont (13.0f, true));
-        g.drawText (kWallNames[i], (int) x, 12, (int) w - 8, 16, juce::Justification::centredLeft);
-
-        g.setColour (I < 0.15f ? C::hot : C::text);
-        g.setFont (monoFont (21.0f));
-        g.drawText (percent (I), (int) x, 29, (int) w - 8, 24, juce::Justification::centredLeft);
-
-        // load against yield: the tick is yield; past it the wall is taking damage now
-        const auto bar = juce::Rectangle<float> (x, 59.0f, w - 22.0f, 3.0f);
-        g.setColour (C::panel2);
-        g.fillRect (bar);
-        const float fill = juce::jlimit (0.0f, 1.0f, s / 2.0f);
-        g.setColour (s >= 1.0f ? C::hot : C::dim);
-        g.fillRect (bar.withWidth (bar.getWidth() * fill));
-        g.setColour (C::text.withAlpha (0.7f));
-        g.fillRect (bar.getX() + bar.getWidth() * 0.5f - 0.5f, bar.getY() - 3.0f, 1.0f, bar.getHeight() + 6.0f);
-    }
-}
-
-void HistoryGraph::paint (juce::Graphics& g)
-{
-    const auto r = getLocalBounds().toFloat();
-    g.fillAll (C::bg);
-
-    g.setColour (C::dim);
-    g.setFont (uiFont (13.0f, true));
-    g.drawText ("Last 12 seconds", 20, 6, 200, 16, juce::Justification::centredLeft);
-    g.setFont (uiFont (12.0f));
-    g.setColour (C::text.withAlpha (0.85f));
-    g.drawText ("standing", (int) r.getRight() - 190, 6, 70, 16, juce::Justification::centredRight);
-    g.setColour (C::hot);
-    g.drawText ("load", (int) r.getRight() - 112, 6, 40, 16, juce::Justification::centredRight);
-    g.setColour (C::dim);
-    g.drawText ("fractures", (int) r.getRight() - 72, 6, 52, 16, juce::Justification::centredRight);
-
-    const auto plot = juce::Rectangle<float> (20.0f, 30.0f, r.getWidth() - 40.0f, r.getHeight() - 52.0f);
-    g.setColour (C::line.withAlpha (0.6f));
-    for (int sec = 0; sec <= 12; sec += 3)
-    {
-        const float x = plot.getRight() - plot.getWidth() * (float) sec / 12.0f;
-        g.drawVerticalLine ((int) x, plot.getY(), plot.getBottom());
-    }
-
-    constexpr float kStressTop = 3.0f;
-    const float yieldY = plot.getBottom() - plot.getHeight() / kStressTop;
-    {
-        juce::Path dash, dashed;
-        dash.startNewSubPath (plot.getX(), yieldY);
-        dash.lineTo (plot.getRight(), yieldY);
-        const float pattern[] = { 3.0f, 4.0f };
-        juce::PathStrokeType (1.0f).createDashedStroke (dashed, dash, pattern, 2);
-        g.setColour (C::hot.withAlpha (0.5f));
-        g.fillPath (dashed);
-    }
-
-    const int N = LiveState::kHistory;
-    auto xAt = [&] (int i) { return plot.getX() + plot.getWidth() * (float) i / (float) (N - 1); };
-    juce::Path integ, stress;
-    for (int i = 0; i < N; ++i)
-    {
-        const int idx = (live.histPos + 1 + i) % N;
-        const float x = xAt (i);
-        const float yi = plot.getBottom() - plot.getHeight() * juce::jlimit (0.0f, 1.0f, live.histIntegrity[(size_t) idx]);
-        const float ys = plot.getBottom() - plot.getHeight() * juce::jlimit (0.0f, 1.0f, live.histStress[(size_t) idx] / kStressTop);
-        if (i == 0) { integ.startNewSubPath (x, yi); stress.startNewSubPath (x, ys); }
-        else        { integ.lineTo (x, yi); stress.lineTo (x, ys); }
-        if (live.histFracture[(size_t) idx] > 0.0f)
-        {
-            g.setColour (C::dim);
-            g.fillRect (x - 0.5f, plot.getBottom() + 4.0f, 1.0f, 6.0f);
-        }
-    }
-    {
-        juce::Path area = integ;
-        area.lineTo (plot.getRight(), plot.getBottom());
-        area.lineTo (plot.getX(), plot.getBottom());
-        area.closeSubPath();
-        g.setGradientFill (juce::ColourGradient (C::text.withAlpha (0.13f), 0.0f, plot.getY(), C::text.withAlpha (0.0f), 0.0f, plot.getBottom(), false));
-        g.fillPath (area);
-    }
-    g.setColour (C::hot.withAlpha (0.9f));
-    g.strokePath (stress, juce::PathStrokeType (1.3f, juce::PathStrokeType::curved));
-    g.setColour (C::text.withAlpha (0.92f));
-    g.strokePath (integ, juce::PathStrokeType (1.8f, juce::PathStrokeType::curved));
-
-    g.setColour (C::hot.withAlpha (0.75f));
-    g.setFont (uiFont (10.5f, true));
-    g.drawText ("yield", (int) plot.getX() + 4, (int) yieldY - 14, 40, 12, juce::Justification::centredLeft);
-}
-
-StructureView::StructureView (LiveState& s, juce::AudioProcessorValueTreeState& apvts)
-    : house (s, apvts), survey (s), history (s)
-{
-    setInfo (house, "monitor");
-    addAndMakeVisible (house);
-    addAndMakeVisible (survey);
-    addAndMakeVisible (history);
-}
-
-void StructureView::paint (juce::Graphics& g) { g.fillAll (C::bg); }
-
-void StructureView::resized()
-{
-    house.setBounds (0, 0, getWidth(), 500);
-    survey.setBounds (0, 500, getWidth(), 74);
-    history.setBounds (0, 574, getWidth(), getHeight() - 574);
-}
-
-void StructureView::refresh (float dt)
-{
-    house.tick (dt);   // repaints itself when something changed
-    survey.highlighted = house.hoveredWall();
-    survey.repaint();
-    history.repaint();
-}
-
-//==============================================================================
-// Room panel
-//==============================================================================
-namespace
-{
-    struct KnobSpec { const char* id; const char* label; };
-    struct Row { const char* title; KnobSpec large; KnobSpec others[3]; };
-    const Row kRows[] = {
-        { "Structure",   { ids::yield, "Yield" },    { { ids::bias, "Brittle / ductile" }, { ids::asymmetry, "Asymmetry" }, { ids::heal, "Healing" } } },
-        { "Destruction", { ids::impact, "Impact" },  { { ids::rumble, "Rumble" }, { ids::debris, "Debris" }, { ids::drive, "Drive" } } },
-        { "Space",       { ids::decay, "Decay" },    { { ids::size, "Size" }, { ids::predelay, "Pre-delay" }, { ids::density, "Density" } } },
-    };
-    const KnobSpec kToneRow[4] = { { ids::lowCut, "Low cut" }, { ids::highCut, "High cut" }, { ids::width, "Width" }, { ids::motion, "Motion" } };
-    constexpr int kRowY[4] = { 84, 222, 360, 498 };
-}
-
-RoomPanel::RoomPanel (RoomBreakerAudioProcessor& p)
-    : proc (p),
-      material (p.apvts, ids::material, "Material"),
-      voidType (p.apvts, ids::voidType, "Outside")
-{
-    addAndMakeVisible (material);
-    addAndMakeVisible (voidType);
-    for (const auto& row : kRows)
-    {
-        knobs.push_back (std::make_unique<Knob> (p.apvts, row.large.id, row.large.label, Knob::Large));
-        for (const auto& k : row.others)
-            knobs.push_back (std::make_unique<Knob> (p.apvts, k.id, k.label, Knob::Regular));
-    }
-    for (const auto& k : kToneRow)
-        knobs.push_back (std::make_unique<Knob> (p.apvts, k.id, k.label, Knob::Regular));
-    for (auto& k : knobs)
-        addAndMakeVisible (*k);
-}
-
-void RoomPanel::paint (juce::Graphics& g)
-{
-    g.fillAll (C::panel);
-    g.setColour (C::line);
-    g.drawVerticalLine (0, 0.0f, (float) getHeight());
-
-    for (int r = 0; r < 3; ++r)
-        drawSection (g, 24, kRowY[r], getWidth() - 48, kRows[r].title);
-    drawSection (g, 24, kRowY[3], getWidth() - 48, "Tone");
-
-    // preset notes
-    const auto& presets = getFactoryPresets();
-    const int cp = proc.getCurrentProgram();
-    if (cp >= 0 && cp < (int) presets.size())
-    {
-        const int y = 642;
-        g.setColour (C::line);
-        g.drawHorizontalLine (y, 24.0f, (float) getWidth() - 24.0f);
-        drawParagraph (g, presets[(size_t) cp].description, { 24.0f, (float) y + 12.0f, (float) getWidth() - 48.0f, 60.0f },
-                       uiFont (13.0f), C::dim);
-    }
-}
-
-void RoomPanel::resized()
-{
-    material.setBounds (24, 16, 168, 48);
-    voidType.setBounds (204, 16, getWidth() - 228, 48);
-
-    size_t k = 0;
-    for (int r = 0; r < 3; ++r)
-    {
-        const int y = kRowY[r] + 24;
-        knobs[k++]->setBounds (18, y, 108, 108);
-        for (int c = 0; c < 3; ++c)
-            knobs[k++]->setBounds (132 + c * 84, y + 12, 84, 92);
-    }
-    for (int c = 0; c < 4; ++c)
-        knobs[k++]->setBounds (24 + c * 88, kRowY[3] + 30, 88, 92);
-}
-
-//==============================================================================
-// Engine page
-//==============================================================================
-namespace
-{
-    constexpr int kSheetX = 48, kControlX = 300, kNoteX = 620, kRowH = 128, kSheetTop = 40;
-}
-
-EnginePage::EnginePage (RoomBreakerAudioProcessor& p, const LiveState& s)
-    : proc (p), live (s),
-      oversampling (p.apvts, ids::oversampling, { "Off", "2x", "4x" }),
-      stressSource (p.apvts, ids::stressSource, { "Input", "Sidechain", "Both" }),
-      duck (p.apvts, ids::duck, "", Knob::Regular),
-      limiter (p.apvts, ids::limiter, "On")
-{
-    for (juce::Component* c : { (juce::Component*) &oversampling, (juce::Component*) &stressSource,
-                                (juce::Component*) &duck, (juce::Component*) &limiter })
-        addAndMakeVisible (c);
-}
-
-void EnginePage::resized()
-{
-    oversampling.setBounds (kControlX, kSheetTop + 2, 240, 30);
-    limiter.setBounds (kControlX, kSheetTop + kRowH + 4, 120, 26);
-    duck.setBounds (kControlX - 6, kSheetTop + 2 * kRowH - 4, 92, 100);
-    stressSource.setBounds (kControlX, kSheetTop + 3 * kRowH + 2, 280, 30);
-}
-
-void EnginePage::paint (juce::Graphics& g)
-{
-    g.fillAll (C::bg);
-    const int w = getWidth() - 2 * kSheetX;
-
-    auto row = [&] (int index, const juce::String& title, const juce::String& note)
-    {
-        const int y = kSheetTop + index * kRowH;
-        if (index > 0)
-        {
-            g.setColour (C::line);
-            g.drawHorizontalLine (y - 24, (float) kSheetX, (float) (kSheetX + w));
-        }
-        g.setColour (C::text);
-        g.setFont (uiFont (17.0f, true));
-        g.drawText (title, kSheetX, y + 4, kControlX - kSheetX - 20, 22, juce::Justification::centredLeft);
-        drawParagraph (g, note, { (float) kNoteX, (float) y + 6.0f, (float) (kSheetX + w - kNoteX), 90.0f }, uiFont (14.0f), C::dim);
-        return y;
-    };
-
-    // oversampling
-    {
-        const int factor = proc.activeFactor.load();
-        const double sr = proc.getHostSampleRate();
-        const juce::String note = factor == 1
-            ? juce::String ("The room runs at the session rate, ") + juce::String (sr / 1000.0, 1) + " kHz. Lowest CPU; Drive can alias on bright material."
-            : "The room runs at " + juce::String (sr * factor / 1000.0, 1) + " kHz. Cleaner Drive and debris, for about "
-              + juce::String (factor) + "x the CPU. The dry signal is untouched, so there is no added latency.";
-        const int y = row (0, "Oversampling", note);
-        g.setColour (C::dim);
-        g.setFont (monoFont (13.0f));
-        g.drawText ("CPU " + juce::String (live.cpu * 100.0f, 1) + "%", kControlX, y + 42, 200, 16, juce::Justification::centredLeft);
-    }
-
-    row (1, "Safety limiter", "A soft ceiling from -1 dBFS to 0 dBFS on the output. It only touches overs, such as a detonation "
-                             "into a full mix. Leave it on unless a limiter follows.");
-
-    {
-        const int y = row (2, "Ducking", "Pulls the room down while the dry signal plays and lets it bloom back in the gaps, "
-                                         "so vocals and leads stay clear without a shorter tail.");
-        const float duckDb = juce::Decibels::gainToDecibels (live.frame.duckGain, -60.0f);
-        g.setColour (C::dim);
-        g.setFont (uiFont (13.0f));
-        g.drawText ("Room level now", kControlX + 110, y + 26, 160, 16, juce::Justification::centredLeft);
-        g.setColour (C::text);
-        g.setFont (monoFont (20.0f));
-        g.drawText (juce::String (duckDb, 1) + " dB", kControlX + 110, y + 44, 160, 24, juce::Justification::centredLeft);
-    }
-
-    {
-        const int y = row (3, "What breaks the walls",
-                           "Input: the sound you are reverberating. Sidechain: another track, such as a kick or a riser, "
-                           "breaks this room while you hear this track's reverb. Most hosts show a sidechain selector "
-                           "in the plugin window's title bar.");
-        const bool sc = proc.sidechainConnected.load();
-        g.setColour (sc ? C::text : C::dim);
-        g.setFont (uiFont (13.0f));
-        g.drawText (sc ? "Sidechain connected" : "No sidechain connected", kControlX, y + 42, 200, 16, juce::Justification::centredLeft);
-        const auto bar = juce::Rectangle<float> ((float) kControlX, (float) y + 64.0f, 280.0f, 3.0f);
-        g.setColour (C::panel2);
-        g.fillRect (bar);
-        const float keyDb = juce::Decibels::gainToDecibels (live.keyMeter, -60.0f);
-        g.setColour (C::text.withAlpha (0.8f));
-        g.fillRect (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, (keyDb + 60.0f) / 60.0f)));
-    }
-
-    {
-        const int y = kSheetTop + 4 * kRowH;
-        g.setColour (C::line);
-        g.drawHorizontalLine (y - 24, (float) kSheetX, (float) (kSheetX + w));
-        g.setColour (C::dim);
-        g.setFont (uiFont (13.0f));
-        g.drawText ("RoomBreaker " + juce::String (JucePlugin_VersionString) + ". Presets never change the settings on this page.",
-                    kSheetX, y, w, 18, juce::Justification::centredLeft);
-    }
-}
-
-//==============================================================================
-// Info panel
-//==============================================================================
-InfoPanel::InfoPanel (RoomBreakerAudioProcessor& p, const LiveState& s) : proc (p), live (s)
+InfoLine::InfoLine()
 {
     setInterceptsMouseClicks (false, false);
-    startTimerHz (10);
+    startTimerHz (5);
 }
 
-void InfoPanel::mouseEnter (const juce::MouseEvent& e)
+void InfoLine::mouseEnter (const juce::MouseEvent& e)
 {
-    const auto key = infoKeyFor (e.eventComponent);
-    if (key.isNotEmpty())
+    const auto k = infoKeyFor (e.eventComponent);
+    if (k.isNotEmpty())
     {
         clearAt = 0;
-        if (key != hoverKey) { hoverKey = key; repaint(); }
+        if (k != key) { key = k; repaint(); }
     }
 }
 
-void InfoPanel::mouseExit (const juce::MouseEvent&)
+void InfoLine::mouseExit (const juce::MouseEvent&)
 {
-    // Leaving a knob for its own label (or a gap) shouldn't flicker the panel: clear a moment later.
-    clearAt = juce::Time::getMillisecondCounter() + 450;
+    // Moving from a control across a gap shouldn't flicker the line: clear a moment later.
+    clearAt = juce::Time::getMillisecondCounter() + 400;
 }
 
-void InfoPanel::timerCallback()
+void InfoLine::timerCallback()
 {
     if (clearAt != 0 && juce::Time::getMillisecondCounter() >= clearAt)
     {
         clearAt = 0;
-        hoverKey.clear();
+        key.clear();
         repaint();
     }
 }
 
-void InfoPanel::paint (juce::Graphics& g)
+void InfoLine::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat();
-    g.fillAll (C::bg2);
-    g.setColour (C::line);
-    g.drawVerticalLine (0, 0.0f, r.getHeight());
+    if (const auto* h = findHelp (key))
+    {
+        const juce::String title = juce::String (h->title).toUpperCase();
+        g.setFont (type::caps());
+        g.setColour (C::text0);
+        g.drawText (title, r, juce::Justification::centredLeft, false);
+        r.removeFromLeft (type::width (type::caps(), title) + 12.0f);
 
-    const auto body = r.reduced (24.0f, 0.0f).withTrimmedTop (20.0f).withTrimmedBottom (18.0f);
-    if (hoverKey.isNotEmpty()) paintHelp (g, body);
-    else                       paintStatus (g, body);
-}
-
-void InfoPanel::paintHelp (juce::Graphics& g, juce::Rectangle<float> r)
-{
-    const auto* help = findHelp (hoverKey);
-    if (help == nullptr)
+        juce::String text (h->text);
+        if (const int dot = text.indexOf (". "); dot > 0)
+            text = text.substring (0, dot + 1);   // the first sentence; the rest is in the manual
+        g.setFont (type::text());
+        g.setColour (C::text1);
+        g.drawText (text, r, juce::Justification::centredLeft, true);
         return;
-
-    g.setColour (C::text);
-    g.setFont (logoFont (28.0f));
-    g.drawFittedText (help->title, r.removeFromTop (34.0f).toNearestInt(), juce::Justification::centredLeft, 1);
-
-    if (auto* p = proc.apvts.getParameter (hoverKey))
-    {
-        g.setColour (C::text);
-        g.setFont (monoFont (22.0f));
-        g.drawFittedText (p->getCurrentValueAsText(), r.removeFromTop (28.0f).toNearestInt(), juce::Justification::centredLeft, 1);
-        g.setColour (C::dim);
-        g.setFont (uiFont (13.0f));
-        g.drawText ("Default " + p->getText (p->getDefaultValue(), 32), r.removeFromTop (18.0f), juce::Justification::centredLeft);
     }
-    r.removeFromTop (14.0f);
-    g.setColour (C::line);
-    g.drawHorizontalLine ((int) r.getY(), r.getX(), r.getRight());
-    r.removeFromTop (14.0f);
+    g.setFont (type::text());
+    g.setColour (C::text2);
+    g.drawText ("Drag a knob to set it.  Shift: fine.  Wheel: step.  Double-click: type a value.  Alt-click: default.  Right-click: more.",
+                r, juce::Justification::centredLeft, true);
+}
 
-    const float used = drawParagraph (g, help->text, r, uiFont (14.5f), C::text.withAlpha (0.9f), 4.0f);
-    r.removeFromTop (used + 16.0f);
+//==============================================================================
+// The display
+//==============================================================================
+DisplayOverlay::DisplayOverlay (const LiveState& l, const HouseView& h, RoomBreakerAudioProcessor& p)
+    : live (l), house (h), proc (p)
+{
+    setInterceptsMouseClicks (false, false);
+}
 
-    juce::String detail;
-    if (hoverKey == ids::material)
+void DisplayOverlay::refresh()
+{
+    juce::uint64 sig = 1469598103934665603ull;
+    auto mix = [&sig] (int v) { sig = (sig ^ (juce::uint64) (juce::int64) v) * 1099511628211ull; };
+    for (size_t w = 0; w < 6; ++w)
     {
-        const int m = (int) proc.apvts.getRawParameterValue (ids::material)->load();
-        detail = juce::String (dsp::getMaterialProfile (m).name) + ": " + dsp::getMaterialVoicing (m).blurb;
+        mix (juce::roundToInt (live.frame.integrity[w] * 400.0f));
+        mix (juce::roundToInt (std::min (live.frame.stressRatio[w], 1.5f) * 40.0f));
     }
-    else if (hoverKey == ids::voidType)
+    mix (house.hoveredWall());
+    mix (house.isMouseOverOrDragging() ? 1 : 0);
+    if (auto* b = proc.apvts.getRawParameterValue (ids::bypass)) mix (b->load() > 0.5f ? 1 : 0);
+    if (sig != shown)
     {
-        const int v = (int) proc.apvts.getRawParameterValue (ids::voidType)->load();
-        detail = juce::String (dsp::getVoidProfile (v).name) + ": " + dsp::getVoidBlurb (v);
-    }
-    if (detail.isNotEmpty())
-        drawParagraph (g, detail, r, uiFont (13.5f), C::dim, 3.0f);
-
-    if (dynamic_cast<juce::AudioParameterFloat*> (proc.apvts.getParameter (hoverKey)) != nullptr)
-    {
-        g.setColour (C::dim);
-        g.setFont (uiFont (13.0f));
-        g.drawText ("Double-click the knob to reset it.", getLocalBounds().withTrimmedBottom (16).removeFromBottom (16).reduced (24, 0),
-                    juce::Justification::centredLeft);
+        shown = sig;
+        repaint();
     }
 }
 
-void InfoPanel::paintStatus (juce::Graphics& g, juce::Rectangle<float> r)
+void DisplayOverlay::paint (juce::Graphics& g)
 {
-    const auto& presets = getFactoryPresets();
-    const int cp = proc.getCurrentProgram();
-    if (cp >= 0 && cp < (int) presets.size())
+    const auto& f = live.frame;
+
+    // Condition readout: overall, then each surface with its load against yield.
     {
-        g.setColour (C::dim);
-        g.setFont (uiFont (13.0f));
-        g.drawText (presets[(size_t) cp].category, r.removeFromTop (18.0f), juce::Justification::centredLeft);
-        g.setColour (C::text);
-        g.setFont (logoFont (28.0f));
-        g.drawFittedText (presets[(size_t) cp].name, r.removeFromTop (34.0f).toNearestInt(), juce::Justification::centredLeft, 1, 0.8f);
+        const auto r = readoutBounds();
+        g.setColour (C::bg0.withAlpha (0.88f));
+        g.fillRect (r);
+        g.setColour (C::line);
+        g.drawRect (r, 1.0f);
+
+        auto in = r.reduced (12.0f, 9.0f);
+        const float I = live.meanIntegrity();
+        auto row = in.removeFromTop (16.0f);
+        g.setFont (type::caps());
+        g.setColour (C::text1);
+        g.drawText ("CONDITION", row, juce::Justification::centredLeft, false);
+        g.setColour (stateColour (I));
+        g.drawText (integrityState (I), row, juce::Justification::centredRight, false);
+
+        in.removeFromTop (4.0f);
+        row = in.removeFromTop (18.0f);
+        g.setFont (type::mono());
+        g.setColour (C::text0);
+        g.drawText (juce::String (juce::roundToInt (I * 100.0f)) + "%", row.removeFromLeft (44.0f), juce::Justification::centredLeft, false);
+        const auto bar = row.withSizeKeepingCentre (row.getWidth(), 4.0f);
+        g.setColour (C::edge);
+        g.fillRect (bar);
+        g.setColour (I < 0.45f ? C::danger : C::text1);
+        g.fillRect (bar.withWidth (bar.getWidth() * juce::jlimit (0.0f, 1.0f, I)));
+
+        in.removeFromTop (6.0f);
+        const float colW = (in.getWidth() - 5.0f * 8.0f) / 6.0f;
+        const int hovered = house.hoveredWall();
+        for (int w = 0; w < 6; ++w)
+        {
+            const auto col = juce::Rectangle<float> (in.getX() + (float) w * (colW + 8.0f), in.getY(), colW, in.getHeight());
+            const bool hot = w == hovered;
+            const float wi = juce::jlimit (0.0f, 1.0f, f.integrity[(size_t) w]);
+            g.setFont (type::caps());
+            g.setColour (hot ? C::accent : C::text2);
+            g.drawText (kSurfaceLetters[w], col.withHeight (13.0f), juce::Justification::centredLeft, false);
+            const auto b = juce::Rectangle<float> (col.getX(), col.getY() + 18.0f, colW, 3.0f);
+            g.setColour (C::edge);
+            g.fillRect (b);
+            g.setColour (hot ? C::accent : wi < 0.45f ? C::danger : C::text1);
+            g.fillRect (b.withWidth (colW * wi));
+            // load against yield: a tick that reaches the end of the bar at the yield threshold
+            const float s = f.stressRatio[(size_t) w];
+            if (s > 0.02f)
+            {
+                g.setColour (s >= 1.0f ? C::danger : C::text0);
+                g.fillRect (b.getX() + colW * std::min (s, 1.0f) - 1.0f, b.getY() - 3.0f, 1.5f, 9.0f);
+            }
+        }
     }
 
-    const int m = (int) proc.apvts.getRawParameterValue (ids::material)->load();
-    const int v = (int) proc.apvts.getRawParameterValue (ids::voidType)->load();
-    auto block = [&] (const juce::String& name, const juce::String& text)
+    // The surface under the mouse, in words.
+    if (const int w = house.hoveredWall(); w >= 0 && w < 6)
     {
-        r.removeFromTop (12.0f);
-        g.setColour (C::text);
-        g.setFont (uiFont (14.5f, true));
-        g.drawText (name, r.removeFromTop (20.0f), juce::Justification::centredLeft);
-        r.removeFromTop (drawParagraph (g, text, r.withHeight (72.0f), uiFont (13.5f), C::dim, 3.0f) + 2.0f);
-    };
-    block (dsp::getMaterialProfile (m).name, dsp::getMaterialVoicing (m).blurb);
-    block ("Outside: " + juce::String (dsp::getVoidProfile (v).name), dsp::getVoidBlurb (v));
+        const auto r = readoutBounds().withY (readoutBounds().getBottom() + 6.0f).withHeight (26.0f);
+        g.setColour (C::bg0.withAlpha (0.88f));
+        g.fillRect (r);
+        g.setColour (C::line);
+        g.drawRect (r, 1.0f);
+        const float I = f.integrity[(size_t) w];
+        auto in = r.reduced (12.0f, 0.0f);
+        g.setFont (type::caps());
+        g.setColour (C::accent);
+        g.drawText (juce::String (kSurfaceNames[w]).toUpperCase(), in, juce::Justification::centredLeft, false);
+        g.setFont (type::mono (type::S));
+        g.setColour (C::text0);
+        g.drawText (juce::String (juce::roundToInt (I * 100.0f)) + "%  load " + juce::String (f.stressRatio[(size_t) w], 2) + "x",
+                    in, juce::Justification::centredRight, false);
+    }
 
-    r.removeFromTop (16.0f);
-    g.setColour (C::line);
-    g.drawHorizontalLine ((int) r.getY(), r.getX(), r.getRight());
-    r.removeFromTop (14.0f);
-
-    const auto& f = live.frame;
-    int weakest = 0;
-    for (int w = 1; w < dsp::kNumWalls; ++w)
-        if (f.integrity[(size_t) w] < f.integrity[(size_t) weakest]) weakest = w;
-    const bool permadeath = proc.apvts.getRawParameterValue (ids::heal)->load() >= kPermadeathSeconds - 0.01f;
-    const float meanI = live.meanIntegrity(), stress = live.maxStress();
-
-    auto line = [&] (const juce::String& label, const juce::String& value, bool alarm = false)
+    // How to move it, while the mouse is on it.
+    if (house.isMouseOverOrDragging())
     {
-        auto row = r.removeFromTop (24.0f);
-        g.setColour (C::dim);
-        g.setFont (uiFont (14.0f));
-        g.drawText (label, row, juce::Justification::centredLeft);
-        g.setColour (alarm ? C::hot : C::text);
-        g.setFont (monoFont (15.0f));
-        g.drawText (value, row, juce::Justification::centredRight);
-    };
-    line ("Standing", percent (meanI));
-    line ("Weakest", juce::String (kWallNames[weakest]) + " " + percent (f.integrity[(size_t) weakest]), f.integrity[(size_t) weakest] < 0.15f);
-    line ("Peak load", juce::String (stress, 2) + "x yield", stress >= 1.0f);
-    line ("Repairs", f.frozen ? juce::String ("frozen") : (permadeath ? juce::String ("never (permadeath)") : juce::String ("healing")));
+        const juce::String hint = "DRAG TO TURN    DOUBLE-CLICK TO FACE FRONT";
+        const float w = type::width (type::caps(), hint) + 24.0f;
+        const auto r = juce::Rectangle<float> (12.0f, (float) getHeight() - 38.0f, w, 26.0f);
+        g.setColour (C::bg0.withAlpha (0.8f));
+        g.fillRect (r);
+        g.setFont (type::caps());
+        g.setColour (C::text1);
+        g.drawText (hint, r, juce::Justification::centred, false);
+    }
 
-    r.removeFromTop (16.0f);
+    // Bypassed: the picture steps back and says so.
+    if (auto* b = proc.apvts.getRawParameterValue (ids::bypass); b != nullptr && b->load() > 0.5f)
+    {
+        g.setColour (C::bg0.withAlpha (0.6f));
+        g.fillRect (getLocalBounds());
+        const auto tag = getLocalBounds().toFloat().withSizeKeepingCentre (120.0f, 32.0f);
+        g.setColour (C::bg0);
+        g.fillRoundedRectangle (tag, 3.0f);
+        g.setColour (C::accent);
+        g.drawRoundedRectangle (tag.reduced (0.5f), 3.0f, 1.0f);
+        g.setFont (type::caps());
+        g.drawText ("BYPASSED", tag, juce::Justification::centred, false);
+    }
+}
+
+Display::Display (LiveState& s, RoomBreakerAudioProcessor& p)
+    : house (s, p.apvts), overlay (s, house, p)
+{
+    setInfo (house, "monitor");
+    setInfo (readoutTarget, "condition");
+    house.setBufferedToImage (true);   // the overlay repaints over it without redrawing the house
+    addAndMakeVisible (house);
+    addAndMakeVisible (overlay);
+    addAndMakeVisible (readoutTarget);
+}
+
+void Display::resized()
+{
+    house.setBounds (getLocalBounds().reduced (1));
+    overlay.setBounds (house.getBounds());
+    readoutTarget.setBounds (overlay.readoutBounds().translated (1.0f, 1.0f).getSmallestIntegerContainer());
+}
+
+void Display::paintOverChildren (juce::Graphics& g)
+{
     g.setColour (C::line);
-    g.drawHorizontalLine ((int) r.getY(), r.getX(), r.getRight());
-    r.removeFromTop (14.0f);
+    g.drawRect (getLocalBounds(), 1);
+}
 
-    g.setColour (C::text);
-    g.setFont (uiFont (14.5f, true));
-    g.drawText ("Reading the house", r.removeFromTop (20.0f), juce::Justification::centredLeft);
-    r.removeFromTop (4.0f);
-    drawParagraph (g, "Fine cracks: reflections start to scatter.\n"
-                      "Bare brick or rebar: the wall is loose and rings at its own pitch.\n"
-                      "Holes and missing tiles: sound leaks outside.\n"
-                      "A wall down to a stump: fully breached.\n"
-                      "Flying debris: a fracture, heard as impact and rubble.",
-                   r, uiFont (13.5f), C::dim, 5.0f);
+void Display::refresh (float dt)
+{
+    house.tick (dt);   // repaints itself when something changed
+    overlay.refresh();
+}
+
+//==============================================================================
+// Controls
+//==============================================================================
+namespace
+{
+    struct KnobSpec { const char* id; const char* name; double origin; };
+    struct Section  { const char* title; KnobSpec knobs[4]; };
+
+    // Four sections, four knobs each: what the room is, how it breaks, its size and time, its colour.
+    const Section kSections[] =
+    {
+        { "Structure",   { { ids::yield, "Yield", 0.0 }, { ids::bias, "Ductility", 0.0 }, { ids::asymmetry, "Asymmetry", 0.0 }, { ids::heal, "Healing", 0.0 } } },
+        { "Destruction", { { ids::impact, "Impact", 0.0 }, { ids::rumble, "Rumble", 0.0 }, { ids::debris, "Debris", 0.0 }, { ids::drive, "Drive", 0.0 } } },
+        { "Space",       { { ids::size, "Size", 0.0 }, { ids::decay, "Decay", 0.0 }, { ids::predelay, "Pre-delay", 0.0 }, { ids::density, "Density", 0.0 } } },
+        { "Tone",        { { ids::lowCut, "Low cut", 0.0 }, { ids::highCut, "High cut", 0.0 }, { ids::width, "Width", 0.5 }, { ids::motion, "Motion", 0.0 } } },
+    };
+
+    constexpr int kPad = 12, kKnobW = 92, kDial = 44;
+    constexpr int kSectionY0 = 102, kSectionStep = 122;
+}
+
+ControlPanel::ControlPanel (RoomBreakerAudioProcessor& p)
+    : material (p.apvts, ids::material), outside (p.apvts, ids::voidType),
+      freeze (p.apvts, ids::freeze, "Freeze"),
+      rebuild (p.apvts, ids::reset, "Rebuild", false),
+      detonate (p.apvts, ids::detonate, "Detonate", true)
+{
+    addAndMakeVisible (material);
+    addAndMakeVisible (outside);
+    for (const auto& s : kSections)
+        for (const auto& k : s.knobs)
+        {
+            auto* knob = knobs.add (new Knob (p.apvts, k.id, k.name, (float) kDial));
+            knob->setArcOrigin (k.origin);
+            addAndMakeVisible (knob);
+        }
+    addAndMakeVisible (freeze);
+    addAndMakeVisible (rebuild);
+    addAndMakeVisible (detonate);
+}
+
+Knob* ControlPanel::findKnob (const juce::String& id) const
+{
+    for (auto* k : knobs)
+        if (k->getParameter().getParameterID() == id)
+            return k;
+    return nullptr;
+}
+
+void ControlPanel::resized()
+{
+    const int fieldW = (getWidth() - 2 * kPad - 12) / 2;
+    material.setBounds (kPad, 52, fieldW, 32);
+    outside.setBounds (kPad + fieldW + 12, 52, fieldW, 32);
+
+    for (int s = 0; s < 4; ++s)
+        for (int i = 0; i < 4; ++i)
+            knobs[s * 4 + i]->setBounds (kPad + i * kKnobW, kSectionY0 + s * kSectionStep + 22, kKnobW, Knob::heightFor ((float) kDial));
+
+    const int y = kSectionY0 + 4 * kSectionStep + 6, w = (getWidth() - 2 * kPad - 16) / 3;
+    freeze.setBounds (kPad, y, w, 36);
+    rebuild.setBounds (kPad + w + 8, y, w, 36);
+    detonate.setBounds (getWidth() - kPad - w, y, w, 36);
+}
+
+void ControlPanel::paint (juce::Graphics& g)
+{
+    g.fillAll (C::bg1);
+    const float w = (float) getWidth() - 2.0f * kPad;
+    drawSectionHeader (g, { (float) kPad, 12.0f, w, 16.0f }, "Room");
+    g.setFont (type::caps());
+    g.setColour (C::text2);
+    g.drawText ("MATERIAL", material.getBounds().toFloat().withY (34.0f).withHeight (14.0f), juce::Justification::centredLeft, false);
+    g.drawText ("OUTSIDE", outside.getBounds().toFloat().withY (34.0f).withHeight (14.0f), juce::Justification::centredLeft, false);
+
+    for (int s = 0; s < 4; ++s)
+        drawSectionHeader (g, { (float) kPad, (float) (kSectionY0 + s * kSectionStep), w, 16.0f }, kSections[s].title);
+}
+
+//==============================================================================
+Rail::Rail (RoomBreakerAudioProcessor& p, bool isInput)
+    : input (isInput),
+      meter (isInput ? StereoMeter::Source { { &p.inMeter[0].peak, &p.inMeter[1].peak }, { &p.inMeter[0].meanSquare, &p.inMeter[1].meanSquare } }
+                     : StereoMeter::Source { { &p.outMeter[0].peak, &p.outMeter[1].peak }, { &p.outMeter[0].meanSquare, &p.outMeter[1].meanSquare } },
+             isInput ? "In" : "Out")
+{
+    addAndMakeVisible (meter);
+    auto add = [&] (const char* id, const char* name, double origin)
+    {
+        auto* k = knobs.add (new Knob (p.apvts, id, name, 40.0f));
+        k->setArcOrigin (origin);
+        addAndMakeVisible (k);
+    };
+    auto zeroDb = [&] (const char* id)
+    {
+        auto* param = dynamic_cast<juce::RangedAudioParameter*> (p.apvts.getParameter (id));
+        return param != nullptr ? (double) param->convertTo0to1 (0.0f) : 0.0;
+    };
+    if (input)
+    {
+        add (ids::inputGain, "Input", zeroDb (ids::inputGain));
+        breakBy = std::make_unique<Segmented> (p.apvts, ids::stressSource, juce::StringArray { "Input", "Key", "Both" }, true);
+        addAndMakeVisible (*breakBy);
+    }
+    else
+    {
+        add (ids::mix, "Mix", 0.0);
+        add (ids::duck, "Ducking", 0.0);
+        add (ids::outputGain, "Output", zeroDb (ids::outputGain));
+    }
+}
+
+void Rail::resized()
+{
+    meter.setBounds (14, 14, getWidth() - 28, 336);
+    int y = 366;
+    for (auto* k : knobs)
+    {
+        k->setBounds (0, y, getWidth(), Knob::heightFor (40.0f));
+        y += Knob::heightFor (40.0f) + 8;
+    }
+    if (breakBy != nullptr)
+        breakBy->setBounds (12, y + 20, getWidth() - 24, 84);
+}
+
+void Rail::paint (juce::Graphics& g)
+{
+    if (breakBy != nullptr)
+    {
+        g.setFont (type::caps());
+        g.setColour (C::text1);
+        g.drawText ("BREAK BY", breakBy->getBounds().toFloat().translated (0.0f, -20.0f).withHeight (14.0f),
+                    juce::Justification::centred, false);
+    }
 }
 
 //==============================================================================
 // Header
 //==============================================================================
-Header::Header (RoomBreakerAudioProcessor& p, const LiveState& s)
-    : proc (p), live (s),
-      detonateB (p.apvts, ids::detonate, "Detonate", true),
-      rebuildB (p.apvts, ids::reset, "Rebuild"),
-      input (p.apvts, ids::inputGain, "Input", Knob::Small),
-      mix (p.apvts, ids::mix, "Dry/wet", Knob::Small),
-      output (p.apvts, ids::outputGain, "Output", Knob::Small),
-      oversampling (p.apvts, ids::oversampling, { "Off", "2x", "4x" }),
-      freeze (p.apvts, ids::freeze, "Freeze", C::ice)
+class Header::PresetName : public juce::Button
 {
-    const auto& list = getFactoryPresets();
-    juce::String lastCategory;
-    for (size_t i = 0; i < list.size(); ++i)
+public:
+    explicit PresetName (RoomBreakerAudioProcessor& p) : juce::Button ("Preset"), proc (p)
     {
-        if (lastCategory != list[i].category)
-        {
-            lastCategory = list[i].category;
-            presets.addSectionHeading (lastCategory);
-        }
-        presets.addItem (list[i].name, (int) i + 1);
+        setInfo (*this, "preset");
+        setWantsKeyboardFocus (false);
+        refresh();
     }
-    presets.setTextWhenNothingSelected ("Choose a preset");
-    presets.onChange = [this]
-    {
-        const int index = presets.getSelectedId() - 1;
-        if (index >= 0 && index != proc.getCurrentProgram())
-            loadPreset (index);
-    };
-    setInfo (presets, "preset");
-    setInfo (prevB, "preset");
-    setInfo (nextB, "preset");
-    const int count = (int) list.size();
-    prevB.onClick = [this, count] { loadPreset ((proc.getCurrentProgram() + count - 1) % count); };
-    nextB.onClick = [this, count] { loadPreset ((proc.getCurrentProgram() + 1) % count); };
 
-    constexpr const char* tabNames[] = { "Room", "Engine" };
-    for (int t = 0; t < 2; ++t)
+    void refresh()
     {
-        auto& b = tabs[(size_t) t];
-        b.setButtonText (tabNames[t]);
-        b.getProperties().set ("tab", true);
-        b.setClickingTogglesState (true);
-        b.setRadioGroupId (7171);
-        b.onClick = [this, t] { if (tabs[(size_t) t].getToggleState() && onTab) onTab (t); };
+        auto& lib = proc.presets;
+        const auto e = lib.entry (lib.current());
+        const auto n = lib.currentName();
+        const auto c = lib.current() >= 0 ? e.category : juce::String();
+        const bool m = lib.isModified();
+        if (n != name || c != category || m != modified)
+        {
+            name = n;
+            category = c;
+            modified = m;
+            repaint();
+        }
+    }
+
+    void paintButton (juce::Graphics& g, bool over, bool down) override
+    {
+        const auto r = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (C::bg0);
+        g.fillRoundedRectangle (r, 3.0f);
+        g.setColour (open || down ? C::accent : over ? C::edgeHi : C::edge);
+        g.drawRoundedRectangle (r, 3.0f, 1.0f);
+
+        auto in = r.reduced (12.0f, 0.0f);
+        drawIcon (g, Icon::caret, in.removeFromRight (16.0f).withSizeKeepingCentre (16.0f, 16.0f), over || open ? C::text0 : C::text1);
+        in.removeFromRight (10.0f);
+        if (category.isNotEmpty())
+        {
+            const auto cat = category.toUpperCase();
+            g.setFont (type::caps());
+            g.setColour (C::text2);
+            g.drawText (cat, in, juce::Justification::centredRight, false);
+            in.removeFromRight (type::width (type::caps(), cat) + 14.0f);
+        }
+        if (modified)
+        {
+            g.setColour (C::accent);
+            g.fillEllipse (in.getX(), in.getCentreY() - 3.0f, 6.0f, 6.0f);
+            in.removeFromLeft (14.0f);
+        }
+        g.setFont (type::strong());
+        g.setColour (C::text0);
+        g.drawText (name, in, juce::Justification::centredLeft, true);
+    }
+
+    bool open = false;
+
+private:
+    RoomBreakerAudioProcessor& proc;
+    juce::String name, category;
+    bool modified = false;
+};
+
+Header::Header (RoomBreakerAudioProcessor& p)
+    : proc (p),
+      bypass (*p.apvts.getParameter (ids::bypass), [this] (float v) { bypassed = v > 0.5f; power.setLit (bypassed); repaint(); }, nullptr)
+{
+    name = std::make_unique<PresetName> (p);
+    name->onClick = [this] { if (onBrowse) onBrowse(); };
+    prev.onClick = [this] { step (-1); };
+    next.onClick = [this] { step (+1); };
+    save.onClick = [this] { if (onSave) onSave(); };
+    power.onClick = [this] { bypass.setValueAsCompleteGesture (bypassed ? 0.0f : 1.0f); };
+    scale.onClick = [this] { showScaleMenu(); };
+    for (auto* b : { (juce::Button*) &prev, (juce::Button*) &next, (juce::Button*) &save, (juce::Button*) &power,
+                     (juce::Button*) name.get(), (juce::Button*) &scale })
+    {
+        b->setWantsKeyboardFocus (false);
         addAndMakeVisible (b);
     }
-
-    setInfo (statusArea, "status");
-    setInfo (meterArea, "meters");
-    for (juce::Component* c : { (juce::Component*) &presets, (juce::Component*) &prevB, (juce::Component*) &nextB,
-                                (juce::Component*) &detonateB, (juce::Component*) &rebuildB, (juce::Component*) &input,
-                                (juce::Component*) &mix, (juce::Component*) &output, (juce::Component*) &freeze,
-                                (juce::Component*) &oversampling, (juce::Component*) &statusArea, (juce::Component*) &meterArea })
-        addAndMakeVisible (c);
-    refreshPreset();
-}
-
-void Header::setTab (int t)
-{
-    tabs[(size_t) juce::jlimit (0, 1, t)].setToggleState (true, juce::dontSendNotification);
-}
-
-void Header::loadPreset (int index)
-{
-    proc.setCurrentProgram (index);
-    proc.updateHostDisplay (juce::AudioProcessor::ChangeDetails().withProgramChanged (true));
-    refreshPreset();
-    if (auto* parent = getParentComponent())
-        parent->repaint();
-}
-
-void Header::refreshPreset()
-{
-    shownProgram = proc.getCurrentProgram();
-    presets.setSelectedId (shownProgram + 1, juce::dontSendNotification);
+    setInfo (prev, "preset");
+    setInfo (next, "preset");
+    setInfo (save, "preset");
+    setInfo (power, "bypass");
+    setInfo (scale, "scale");
+    bypass.sendInitialUpdate();
 }
 
 void Header::resized()
 {
-    tabs[0].setBounds (22, 52, 58, 26);
-    tabs[1].setBounds (88, 52, 66, 26);
-
-    presets.setBounds (316, 12, 236, 30);
-    prevB.setBounds (556, 12, 30, 30);
-    nextB.setBounds (588, 12, 30, 30);
-    detonateB.setBounds (316, 48, 150, 28);
-    rebuildB.setBounds (472, 48, 146, 28);
-
-    input.setBounds (646, 2, 72, 80);
-    mix.setBounds (720, 2, 72, 80);
-    output.setBounds (794, 2, 72, 80);
-
-    oversampling.setBounds (896, 30, 186, 24);
-    freeze.setBounds (896, 58, 120, 22);
-
-    statusArea.setBounds (1104, 6, 106, 72);
-    meterArea.setBounds (1214, 4, 60, 76);
-}
-
-void Header::tick()
-{
-    if (proc.getCurrentProgram() != shownProgram)   // host changed the program
-        refreshPreset();
-    if (const int d = proc.detonateCount.load(); d != lastDetonate) { lastDetonate = d; detonateGlow = 18; }
-    if (detonateGlow > 0) --detonateGlow;
-    repaint (0, 0, 300, getHeight());
-    repaint (1090, 0, 190, getHeight());
+    const int groupW = 32 + 4 + 32 + 8 + 360 + 8 + 32;
+    int x = (getWidth() - groupW) / 2;
+    prev.setBounds (x, 8, 32, 32);            x += 36;
+    next.setBounds (x, 8, 32, 32);            x += 40;
+    name->setBounds (x, 8, 360, 32);          x += 368;
+    save.setBounds (x, 8, 32, 32);
+    power.setBounds (getWidth() - 16 - 32, 8, 32, 32);
+    scale.setBounds (power.getX() - 8 - 64, 10, 64, 28);
 }
 
 void Header::paint (juce::Graphics& g)
 {
-    const auto r = getLocalBounds().toFloat();
-    g.fillAll (C::bg2);
-    g.setColour (detonateGlow > 0 ? C::hot.withAlpha (0.4f + 0.6f * (float) detonateGlow / 18.0f) : C::line);
-    g.drawHorizontalLine (getHeight() - 1, 0.0f, r.getRight());
-    g.setColour (C::line);
-    for (int x : { 296, 632, 878, 1090 })
-        g.drawVerticalLine (x, 14.0f, r.getBottom() - 14.0f);
+    g.fillAll (C::bg1);
+    // wordmark: the name, and the version in the scale's mono
+    const juce::String word = "ROOMBREAKER";
+    const auto f = type::strong().withExtraKerningFactor (0.14f);
+    g.setFont (f);
+    g.setColour (C::text0);
+    g.drawText (word, juce::Rectangle<float> (20.0f, 0.0f, 200.0f, (float) getHeight()), juce::Justification::centredLeft, false);
+    g.setFont (type::mono (type::S));
+    g.setColour (C::text2);
+    g.drawText (JucePlugin_VersionString, juce::Rectangle<float> (26.0f + type::width (f, word), 1.0f, 60.0f, (float) getHeight()),
+                juce::Justification::centredLeft, false);
 
-    g.setFont (logoFont (38.0f));
-    g.setColour (C::text);
-    g.drawFittedText ("ROOMBREAKER", 22, 8, 266, 40, juce::Justification::centredLeft, 1, 0.7f);   // squeeze, never truncate (Bahnschrift is wider than DIN)
+    // status, next to the switch that sets it
+    const auto status = juce::Rectangle<float> ((float) scale.getX() - 100.0f, 0.0f, 88.0f, (float) getHeight());
+    g.setFont (type::caps());
+    g.setColour (bypassed ? C::accent : C::text2);
+    g.drawText (bypassed ? "BYPASSED" : "ACTIVE", status, juce::Justification::centredRight, false);
+}
 
-    g.setColour (C::dim);
-    g.setFont (uiFont (13.0f, true));
-    g.drawText ("Oversampling", 896, 8, 186, 18, juce::Justification::centredLeft);
+void Header::tick()
+{
+    name->refresh();
+    const auto s = juce::String (juce::roundToInt (proc.editorScale.load() * 100.0f)) + "%";
+    if (scale.getButtonText() != s)
+        scale.setButtonText (s);
+}
 
-    // status
-    const double sr = proc.getHostSampleRate();
-    const int factor = proc.activeFactor.load();
-    const bool sc = proc.sidechainConnected.load();
-    g.setFont (monoFont (12.5f));
-    g.setColour (C::dim);
-    g.drawText (juce::String (sr / 1000.0, 1) + " kHz  " + (factor > 1 ? juce::String (factor) + "x" : juce::String ("1x")), 1104, 12, 106, 16, juce::Justification::centredLeft);
-    g.drawText ("CPU " + juce::String (live.cpu * 100.0f, 1) + "%", 1104, 32, 106, 16, juce::Justification::centredLeft);
-    g.setColour (sc ? C::text : C::dim);
-    g.drawText (sc ? "Sidechain in" : "No sidechain", 1104, 52, 106, 16, juce::Justification::centredLeft);
+void Header::setBrowserOpen (bool isOpen)
+{
+    name->open = isOpen;
+    name->repaint();
+}
 
-    auto meter = [&] (int x, float v, const char* lbl)
+void Header::step (int delta)
+{
+    auto& lib = proc.presets;
+    const int n = lib.size();
+    if (n == 0)
+        return;
+    const int cur = lib.current();
+    lib.load (cur < 0 ? (delta > 0 ? 0 : n - 1) : (cur + delta + n) % n);
+    name->refresh();
+}
+
+void Header::showScaleMenu()
+{
+    juce::PopupMenu m;
+    m.addSectionHeader ("Interface size");
+    const float now = proc.editorScale.load();
+    for (const int pc : { 75, 100, 125, 150, 175, 200 })
     {
-        const juce::Rectangle<float> bar ((float) x, 10.0f, 10.0f, 58.0f);
-        g.setColour (juce::Colours::black.withAlpha (0.5f));
-        g.fillRect (bar);
-        const float db = juce::Decibels::gainToDecibels (v, -100.0f);
-        constexpr int segs = 18;
-        const float sh = (bar.getHeight() - 2.0f) / (float) segs;
-        for (int k = 0; k < segs; ++k)
-        {
-            const float segDb = -54.0f + 54.0f * (float) (k + 1) / (float) segs;
-            const bool lit = db >= segDb - 3.0f;
-            const auto col = segDb > -3.0f ? C::hot : C::text.withAlpha (0.8f);
-            g.setColour (lit ? col : col.withAlpha (0.08f));
-            g.fillRect (bar.getX() + 1.0f, bar.getBottom() - 1.0f - (float) (k + 1) * sh + 1.0f, bar.getWidth() - 2.0f, sh - 1.0f);
-        }
-        g.setColour (C::dim);
-        g.setFont (uiFont (11.0f, true));
-        g.drawText (lbl, x - 8, 70, 26, 12, juce::Justification::centred);
-    };
-    meter (1224, live.inMeter, "In");
-    meter (1248, live.outMeter, "Out");
+        const float s = (float) pc / 100.0f;
+        m.addItem (juce::String (pc) + " %", true, std::abs (s - now) < 0.02f, [this, s] { if (onScale) onScale (s); });
+    }
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&scale).withStandardItemHeight (26));
+}
+
+//==============================================================================
+// Footer
+//==============================================================================
+Footer::Footer (RoomBreakerAudioProcessor& p)
+    : proc (p), oversampling (p.apvts, ids::oversampling, juce::StringArray { "1x", "2x", "4x" }),
+      limiter (p.apvts, ids::limiter, "Limiter")
+{
+    addAndMakeVisible (info);
+    addAndMakeVisible (oversampling);
+    addAndMakeVisible (limiter);
+    addAndMakeVisible (statusTarget);
+    setInfo (statusTarget, "status");
+}
+
+void Footer::resized()
+{
+    const int h = getHeight();
+    statusTarget.setBounds (getWidth() - 16 - 236, 0, 236, h);
+    limiter.setBounds (statusTarget.getX() - 16 - 84, 5, 84, h - 10);
+    oversampling.setBounds (limiter.getX() - 12 - 108, 5, 108, h - 10);
+    info.setBounds (16, 0, oversampling.getX() - 16 - 110, h);
+}
+
+void Footer::tick()
+{
+    cpu += (proc.getCpuLoad() - cpu) * 0.4f;
+    auto khz = [] (double hz) { return juce::String (hz / 1000.0, std::fmod (hz, 1000.0) == 0.0 ? 0 : 1); };
+    const double rate = proc.getHostSampleRate();
+    const int factor = proc.activeFactor.load();
+    const auto s = khz (rate) + " kHz" + (factor > 1 ? "  room " + khz (rate * factor) + " kHz" : juce::String())
+                 + "  cpu " + juce::String (cpu * 100.0f, 1) + " %";
+    if (s != status)
+    {
+        status = s;
+        repaint (statusTarget.getBounds());
+    }
+}
+
+void Footer::paint (juce::Graphics& g)
+{
+    g.fillAll (C::bg1);
+    g.setFont (type::caps());
+    g.setColour (C::text2);
+    g.drawText ("OVERSAMPLING", oversampling.getBounds().toFloat().translated (-104.0f, 0.0f).withWidth (96.0f),
+                juce::Justification::centredRight, false);
+    g.setFont (type::mono (type::S));
+    g.drawText (status, statusTarget.getBounds().toFloat(), juce::Justification::centredRight, false);
+}
+
+//==============================================================================
+void Canvas::paint (juce::Graphics& g)
+{
+    g.fillAll (C::bg0);
+    g.setColour (C::line);
+    g.fillRect (0, kHeaderH, kDesignW, 1);                       // under the header
+    g.fillRect (0, kDesignH - kFooterH - 1, kDesignW, 1);        // over the footer
+    g.fillRect (kRailW - 1, kBodyY, 1, kBodyH);                  // input rail
+    g.fillRect (kDesignW - kRailW, kBodyY, 1, kBodyH);           // output rail
+    g.fillRect (kPanelX - 1, kBodyY, 1, kBodyH);                 // controls
 }
 
 //==============================================================================
@@ -686,57 +616,76 @@ void Header::paint (juce::Graphics& g)
 //==============================================================================
 RoomBreakerAudioProcessorEditor::RoomBreakerAudioProcessorEditor (RoomBreakerAudioProcessor& p)
     : AudioProcessorEditor (&p), audioProcessor (p),
-      header (p, live), structure (live, p.apvts), roomPanel (p), enginePage (p, live), info (p, live)
+      header (p), inRail (p, true), outRail (p, false), display (live, p), controls (p), footer (p), browser (p.presets)
 {
     setLookAndFeel (&lnf);
-    addAndMakeVisible (root);
-    root.addAndMakeVisible (header);
-    root.addAndMakeVisible (structure);
-    root.addAndMakeVisible (roomPanel);
-    root.addChildComponent (enginePage);
-    root.addAndMakeVisible (info);
-    root.addMouseListener (&info, true);   // INFO follows the mouse everywhere
-    header.onTab = [this] (int t) { setTab (t); };
-    setTab (0);
+    addAndMakeVisible (canvas);
+    for (juce::Component* c : { (juce::Component*) &header, (juce::Component*) &inRail, (juce::Component*) &outRail,
+                                (juce::Component*) &display, (juce::Component*) &controls, (juce::Component*) &footer })
+        canvas.addAndMakeVisible (c);
+    canvas.addChildComponent (browser);
+    canvas.addMouseListener (&footer.info, true);   // the info line follows the mouse everywhere
 
+    header.setBounds (0, 0, kW, kHeaderH);
+    inRail.setBounds (0, kBodyY, kRailW, kBodyH);
+    outRail.setBounds (kW - kRailW, kBodyY, kRailW, kBodyH);
+    display.setBounds (kDisplayArea);
+    controls.setBounds (kPanelX, kBodyY, kPanelW, kBodyH);
+    footer.setBounds (0, kH - kFooterH, kW, kFooterH);
+    browser.setBounds (kRailW, kBodyY, kW - 2 * kRailW, kBodyH);
+
+    header.onBrowse = [this] { if (browser.isVisible()) browser.close(); else { browser.open(); header.setBrowserOpen (true); } };
+    header.onSave = [this] { if (! browser.isVisible()) { browser.open(); header.setBrowserOpen (true); } browser.startSave(); };
+    header.onScale = [this] (float s) { setScale (s); };
+    browser.onClose = [this] { header.setBrowserOpen (false); };
+    browser.onPresetLoaded = [this] { header.tick(); };
+
+    // Resizing: the corner handle and the host both go through the constrainer, which keeps the
+    // design aspect ratio, so one scale factor fits both axes (see resized()). The saved size is
+    // read first: setting the limits resizes the (still empty) window, and that must not be saved.
+    const float s = juce::jlimit (kMinScale, kMaxScale, p.editorScale.load());
     setResizable (true, true);
-    setResizeLimits ((int) (kW * 0.6), (int) (kH * 0.6), (int) (kW * 1.6), (int) (kH * 1.6));
-    if (auto* c = getConstrainer()) c->setFixedAspectRatio ((double) kW / (double) kH);
-    setSize (kW, kH);
+    setResizeLimits (juce::roundToInt (kW * kMinScale), juce::roundToInt (kH * kMinScale),
+                     juce::roundToInt (kW * kMaxScale), juce::roundToInt (kH * kMaxScale));
+    if (auto* c = getConstrainer())
+        c->setFixedAspectRatio ((double) kW / (double) kH);
+    setSize (juce::roundToInt (kW * s), juce::roundToInt (kH * s));
+    sizeReady = true;
+    audioProcessor.editorScale.store (scale);
     startTimerHz (30);
 }
 
 RoomBreakerAudioProcessorEditor::~RoomBreakerAudioProcessorEditor()
 {
     stopTimer();
-    root.removeMouseListener (&info);
+    canvas.removeMouseListener (&footer.info);
     setLookAndFeel (nullptr);
-}
-
-void RoomBreakerAudioProcessorEditor::setTab (int t)
-{
-    tab = juce::jlimit (0, 1, t);
-    structure.setVisible (tab == 0);
-    roomPanel.setVisible (tab == 0);
-    enginePage.setVisible (tab == 1);
-    header.setTab (tab);
 }
 
 void RoomBreakerAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (rb::ui::C::bg);
+    g.fillAll (rb::ui::C::bg0);   // only visible if a host forces a size off the aspect ratio
 }
 
 void RoomBreakerAudioProcessorEditor::resized()
 {
-    const float s = (float) getWidth() / (float) kW;
-    root.setTransform (juce::AffineTransform::scale (s));
-    root.setBounds (0, 0, kW, kH);
-    header.setBounds (0, 0, kW, kHeaderH);
-    structure.setBounds (0, kHeaderH, 600, kH - kHeaderH);
-    roomPanel.setBounds (600, kHeaderH, 400, kH - kHeaderH);
-    enginePage.setBounds (0, kHeaderH, 1000, kH - kHeaderH);
-    info.setBounds (1000, kHeaderH, kW - 1000, kH - kHeaderH);
+    // Everything is laid out once, in design units, inside the canvas; resizing only changes the
+    // canvas's transform. Text and paths are drawn as vectors at the final scale, and the house's
+    // cached layers are rendered at the physical pixel density, so nothing is ever a stretched bitmap.
+    // A host that ignores the aspect ratio gets the largest fit, centred.
+    scale = std::min ((float) getWidth() / (float) kW, (float) getHeight() / (float) kH);
+    const float dx = ((float) getWidth() - (float) kW * scale) * 0.5f;
+    const float dy = ((float) getHeight() - (float) kH * scale) * 0.5f;
+    canvas.setBounds (0, 0, kW, kH);
+    canvas.setTransform (juce::AffineTransform::scale (scale).translated (dx, dy));
+    if (sizeReady)
+        audioProcessor.editorScale.store (scale);
+}
+
+void RoomBreakerAudioProcessorEditor::setScale (float s)
+{
+    s = juce::jlimit (kMinScale, kMaxScale, s);
+    setSize (juce::roundToInt (kW * s), juce::roundToInt (kH * s));
 }
 
 void RoomBreakerAudioProcessorEditor::advance (float seconds)
@@ -747,27 +696,16 @@ void RoomBreakerAudioProcessorEditor::advance (float seconds)
 
 void RoomBreakerAudioProcessorEditor::timerCallback()
 {
-    rb::dsp::TelemetryFrame frame;
-    if (audioProcessor.telemetry.popLatest (frame))
-        live.push (frame);
+    constexpr float dt = 1.0f / 30.0f;
+    rb::dsp::TelemetryFrame f;
+    if (audioProcessor.telemetry.popLatest (f))
+        live.push (f);
     live.tick();
 
-    auto take = [] (std::atomic<float>& a, float& meter)
-    {
-        meter = std::max (a.exchange (0.0f, std::memory_order_relaxed), meter * 0.86f);
-    };
-    take (audioProcessor.inPeak, live.inMeter);
-    take (audioProcessor.outPeak, live.outMeter);
-    take (audioProcessor.keyPeak, live.keyMeter);
-    live.cpu += (audioProcessor.getCpuLoad() - live.cpu) * 0.2f;
-
-    header.tick();
-    if (tab == 0)
-    {
-        structure.refresh (1.0f / 30.0f);
-        roomPanel.repaint (0, 636, roomPanel.getWidth(), 80);   // preset notes
-    }
-    else
-        enginePage.repaint();
-    info.repaint();
+    display.refresh (dt);
+    inRail.tick (dt);
+    outRail.tick (dt);
+    ++frame;
+    if (frame % 3 == 0)  header.tick();   // 10 Hz: preset name, modified mark, size
+    if (frame % 15 == 0) footer.tick();   // 2 Hz: engine status
 }

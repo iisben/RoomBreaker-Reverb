@@ -177,17 +177,20 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
     {
         if (! b.active)
             continue;
+        const float radPerHz = kTwoPi / fs;
         for (int i = 0; i < n; ++i)
         {
             if (b.startDelay > 0) { --b.startDelay; continue; }
             ++b.age;
             const float f = b.freqEnd + b.freqSpan;
             b.freqSpan *= b.freqDecay;
-            b.phase += kTwoPi * f / fs;
+            b.phase += radPerHz * f;
             if (b.phase > kTwoPi) b.phase -= kTwoPi;
             b.attack = std::min (1.0f, b.attack + b.attackInc);
-            // A touch of second harmonic so the boom reads on small speakers.
-            const float s = (std::sin (b.phase) + 0.18f * std::sin (2.0f * b.phase)) * b.amp * b.attack;
+            // A touch of second harmonic so the boom reads on small speakers: sin 2p = 2 sin p cos p.
+            const float sn = fastSin (b.phase);
+            const float cs = fastSin (b.phase < 1.5f * kPi ? b.phase + kHalfPi : b.phase - 1.5f * kPi);
+            const float s = sn * (1.0f + 0.36f * cs) * b.amp * b.attack;
             b.amp *= b.ampDecay;
             outL[i] += s;
             outR[i] += s;
@@ -196,20 +199,82 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
             b.active = false;
     }
 
-    for (auto& v : noises)
+    // Cracks and rubble grains: band-passed noise bursts. They are independent of each other, so
+    // the sounding ones are packed into arrays and advanced together each sample (SIMD): noise
+    // generators, filters and envelopes for up to 24 voices in three vector steps.
     {
-        if (! v.active)
-            continue;
-        for (int i = 0; i < n; ++i)
+        constexpr int kMax = kNumNoises;
+        static_assert (kMax % 8 == 0, "noise count must be a multiple of 8");
+        alignas (32) float a1[kMax], a2[kMax], a3[kMax], s1[kMax], s2[kMax], amp[kMax], decay[kMax], panL[kMax], panR[kMax], tl[kMax], tr[kMax];
+        alignas (32) uint32_t seed[kMax];
+        int slot[kMax], count = 0;
+
+        for (int k = 0; k < kNumNoises; ++k)
         {
-            if (v.startDelay > 0) { --v.startDelay; continue; }
-            const float s = v.band.process (v.rng.bi()).bp * v.amp;
-            v.amp *= v.decay;
-            outL[i] += s * v.panL;
-            outR[i] += s * v.panR;
+            auto& v = noises[(size_t) k];
+            if (! v.active) continue;
+            a1[count] = v.band.a1;  a2[count] = v.band.a2;  a3[count] = v.band.a3;
+            s1[count] = v.band.ic1eq;  s2[count] = v.band.ic2eq;
+            amp[count] = v.amp;  decay[count] = v.decay;  panL[count] = v.panL;  panR[count] = v.panR;
+            seed[count] = v.rng.state;
+            slot[count++] = k;
         }
-        if (v.amp < 1.0e-5f)
-            v.active = false;
+
+        if (count > 0)
+        {
+            const int m = (count + 7) & ~7;
+            for (int k = count; k < m; ++k)
+            {
+                a1[k] = a2[k] = a3[k] = s1[k] = s2[k] = amp[k] = panL[k] = panR[k] = 0.0f;
+                decay[k] = 1.0f;
+                seed[k] = 1u;
+            }
+
+            for (int i = 0; i < n; ++i)
+            {
+                // A voice that has not started yet is held silent: gate 0 freezes its envelope.
+                alignas (32) float gate[kMax];
+                for (int k = 0; k < m; ++k)
+                    gate[k] = 1.0f;
+                for (int k = 0; k < count; ++k)
+                {
+                    auto& v = noises[(size_t) slot[k]];
+                    if (v.startDelay > 0) { --v.startDelay; gate[k] = 0.0f; }
+                }
+
+                for (int k = 0; k < m; ++k)
+                {
+                    uint32_t r = seed[k];
+                    r ^= r << 13;  r ^= r >> 17;  r ^= r << 5;
+                    seed[k] = r;
+                    const float white = ((float) (r >> 8) * (2.0f / 16777216.0f) - 1.0f) * gate[k];
+
+                    const float v3 = white - s2[k];
+                    const float v1 = a1[k] * s1[k] + a2[k] * v3;
+                    const float v2 = s2[k] + a2[k] * s1[k] + a3[k] * v3;
+                    s1[k] = 2.0f * v1 - s1[k];
+                    s2[k] = 2.0f * v2 - s2[k];
+
+                    const float s = v1 * amp[k];
+                    amp[k] *= 1.0f + gate[k] * (decay[k] - 1.0f);
+                    tl[k] = s * panL[k];
+                    tr[k] = s * panR[k];
+                }
+                outL[i] += sumLanes (tl, m);
+                outR[i] += sumLanes (tr, m);
+            }
+
+            for (int k = 0; k < count; ++k)
+            {
+                auto& v = noises[(size_t) slot[k]];
+                v.band.ic1eq = s1[k];
+                v.band.ic2eq = s2[k];
+                v.amp = amp[k];
+                v.rng.state = seed[k];
+                if (v.amp < 1.0e-5f)
+                    v.active = false;
+            }
+        }
     }
 
     for (int i = 0; i < n; ++i)

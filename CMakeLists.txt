@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(RoomBreaker VERSION 2.2.0 LANGUAGES C CXX)
+project(RoomBreaker VERSION 2.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -73,10 +73,23 @@ juce_add_plugin(RoomBreaker
 target_sources(RoomBreaker PRIVATE
     Source/Parameters.cpp
     Source/Presets.cpp
+    Source/PresetLibrary.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/UI/Widgets.cpp
+    Source/UI/PresetBrowser.cpp
     Source/UI/HouseView.cpp
     Source/UI/HousePaint.cpp)
+
+# Typefaces are embedded so the UI looks the same on every system (both SIL Open Font Licence,
+# licence texts alongside): Barlow Semi Condensed for words, JetBrains Mono for numbers.
+juce_add_binary_data(RoomBreakerFonts
+    NAMESPACE RoomBreakerFonts
+    SOURCES
+        Resources/fonts/BarlowSemiCondensed-Medium.ttf
+        Resources/fonts/BarlowSemiCondensed-SemiBold.ttf
+        Resources/fonts/JetBrainsMono.ttf)
+set_target_properties(RoomBreakerFonts PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(RoomBreaker PRIVATE Source)
 
@@ -88,6 +101,7 @@ target_compile_definitions(RoomBreaker PUBLIC
 target_link_libraries(RoomBreaker
     PRIVATE
         rb_core
+        RoomBreakerFonts
         juce::juce_audio_utils
         juce::juce_dsp
     PUBLIC

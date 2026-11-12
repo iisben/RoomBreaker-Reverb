@@ -206,7 +206,9 @@ void HouseView::paint (juce::Graphics& g)
 {
     for (auto& v : hitVisible) v = false;
     prepareFrame();
-    pixelScale = g.getInternalContext().getPhysicalPixelScaleFactor() > 1.05f ? 2.0f : 1.0f;
+    // Cached layers are rendered at the physical density (half-step, at most 3x), so the house
+    // stays sharp at every interface size and on high-density screens.
+    pixelScale = juce::jlimit (1.0f, 3.0f, std::ceil (g.getInternalContext().getPhysicalPixelScaleFactor() * 2.0f - 0.1f) * 0.5f);
     interiorFresh = false;
 
     drawBackdrop (g);
@@ -2375,71 +2377,23 @@ void HouseView::drawDust (juce::Graphics& g, bool front)
 //==============================================================================
 void HouseView::drawAtmosphere (juce::Graphics& g)
 {
-    const auto r = getLocalBounds().toFloat();
-
-    // the header's shadow along the top of the view
-    g.setGradientFill (juce::ColourGradient (ink (0.22f), 0.0f, 0.0f, ink (0.0f), 0.0f, 9.0f, false));
-    g.fillRect (r.withHeight (9.0f));
-
     // the flash of a detonation
     if (blastAge < 0.14f)
     {
         g.setColour (chalk (0.24f * (1.0f - blastAge / 0.14f)));
-        g.fillRect (r);
+        g.fillRect (getLocalBounds());
     }
 }
 
 void HouseView::drawOverlay (juce::Graphics& g)
 {
-    const auto text = light.dark ? juce::Colour (0xffe8e2d4) : juce::Colour (0xff23272b);
-
+    // Only the surface under the mouse is marked here; its readout is drawn by the editor's overlay.
     if (hover >= 0 && hitVisible[(size_t) hover])
     {
-        g.setColour (chalk (0.1f));
+        g.setColour (chalk (0.10f));
         g.fillPath (hitPaths[(size_t) hover]);
-        g.setColour (text.withAlpha (0.75f));
-        g.strokePath (hitPaths[(size_t) hover], juce::PathStrokeType (1.4f));
-
-        static const char* names[] = { "North wall", "South wall (front door)", "East wall", "West wall", "Roof (ceiling)", "Lawn (floor)" };
-        const float I = live.frame.integrity[(size_t) hover], s = live.frame.stressRatio[(size_t) hover];
-        g.setColour (text);
-        g.setFont (uiFont (15.0f, true));
-        g.drawText (names[hover], 16, 12, 300, 20, juce::Justification::centredLeft);
-        g.setFont (monoFont (13.0f));
-        g.setColour (text.withAlpha (0.78f));
-        g.drawText (juce::String (juce::roundToInt (I * 100.0f)) + "% standing    load " + juce::String (s, 2) + "x yield",
-                    16, 32, 320, 18, juce::Justification::centredLeft);
-    }
-
-    if (live.frame.frozen)
-    {
-        g.setColour (text.withAlpha (0.8f));
-        g.setFont (uiFont (13.0f, true));
-        g.drawText ("Frozen", getWidth() - 116, 12, 100, 20, juce::Justification::centredRight);
-    }
-
-    // compass: which way north is after turning the house
-    {
-        const P2 c (28.0f, (float) getHeight() - 30.0f);
-        const P2 north = toScreen ({ 0, 1, 0 }) - toScreen ({ 0, 0, 0 });
-        const P2 nd = north / std::max (0.001f, std::hypot (north.x, north.y));
-        const P2 across (-nd.y, nd.x);
-        g.setColour (text.withAlpha (0.3f));
-        g.drawEllipse (c.x - 12.0f, c.y - 12.0f, 24.0f, 24.0f, 1.0f);
-        juce::Path needle;
-        needle.addTriangle (c + nd * 9.0f, c + across * 3.5f - nd * 3.0f, c - across * 3.5f - nd * 3.0f);
-        g.setColour (text.withAlpha (0.78f));
-        g.fillPath (needle);
-        g.setFont (uiFont (10.5f, true));
-        g.drawText ("N", juce::Rectangle<float> (c.x + nd.x * 21.0f - 8.0f, c.y + nd.y * 21.0f - 7.0f, 16.0f, 14.0f), juce::Justification::centred);
-    }
-
-    if (isMouseOver() && ! dragging)
-    {
-        g.setColour (text.withAlpha (0.5f));
-        g.setFont (uiFont (11.5f));
-        g.drawText ("Drag to turn the house. Double-click to face it again.", 60, getHeight() - 26, getWidth() - 76, 16,
-                    juce::Justification::centredRight);
+        g.setColour (juce::Colour (0xfff0a43c));   // the interface's accent: this is what the mouse is on
+        g.strokePath (hitPaths[(size_t) hover], juce::PathStrokeType (1.5f));
     }
 }
 } // namespace rb::ui

@@ -138,36 +138,76 @@ void ModalDebrisGenerator::updateChatter (float dt, int blockLength) noexcept
 
 void ModalDebrisGenerator::process (float* outL, float* outR, int n) noexcept
 {
-    std::fill (outL, outL + n, 0.0f);
-    std::fill (outR, outR + n, 0.0f);
+    // The resonators are independent of each other, so they are run side by side: the ringing
+    // voices are packed into arrays and every sample advances all of them at once (SIMD), rather
+    // than each voice running its own serial loop over the block. 32 voices cost about what 4 did.
+    constexpr int kMax = kNumVoices;
+    static_assert (kMax % 8 == 0, "voice count must be a multiple of 8");
+    alignas (32) float pr[kMax], pi[kMax], zr[kMax], zi[kMax], panL[kMax], panR[kMax], x[kMax], tl[kMax], tr[kMax];
+    int slotVoice[kMax], exciting[kMax];
+    int count = 0, numExciting = 0;
 
-    for (auto& v : voices)
+    for (int k = 0; k < kNumVoices; ++k)
     {
-        if (! v.active)
-            continue;
+        const auto& v = voices[(size_t) k];
+        if (! v.active) continue;
+        pr[count] = v.pr;  pi[count] = v.pi;  zr[count] = v.zr;  zi[count] = v.zi;
+        panL[count] = v.panL;  panR[count] = v.panR;  x[count] = 0.0f;
+        if (v.startDelay > 0 || v.exciteRemaining > 0)
+            exciting[numExciting++] = count;
+        slotVoice[count++] = k;
+    }
+
+    if (count == 0)
+    {
+        std::fill (outL, outL + n, 0.0f);
+        std::fill (outR, outR + n, 0.0f);
+    }
+    else
+    {
+        const int m = (count + 7) & ~7;
+        for (int k = count; k < m; ++k)
+            pr[k] = pi[k] = zr[k] = zi[k] = panL[k] = panR[k] = x[k] = 0.0f;
 
         for (int i = 0; i < n; ++i)
         {
-            float x = 0.0f;
-            if (v.startDelay > 0)
-                --v.startDelay;
-            else if (v.exciteRemaining > 0)
+            // Excitation bursts are short and few: they stay scalar.
+            for (int e = 0; e < numExciting; ++e)
             {
-                x = v.exciteAmp * v.exciteEnv * v.noise.bi();
-                v.exciteEnv *= v.exciteDecay;
-                --v.exciteRemaining;
+                auto& v = voices[(size_t) slotVoice[exciting[e]]];
+                float in = 0.0f;
+                if (v.startDelay > 0)
+                    --v.startDelay;
+                else if (v.exciteRemaining > 0)
+                {
+                    in = v.exciteAmp * v.exciteEnv * v.noise.bi();
+                    v.exciteEnv *= v.exciteDecay;
+                    --v.exciteRemaining;
+                }
+                x[exciting[e]] = in;
             }
 
-            const float zr = v.pr * v.zr - v.pi * v.zi + x;
-            const float zi = v.pr * v.zi + v.pi * v.zr;
-            v.zr = zr;
-            v.zi = zi;
-            outL[i] += zi * v.panL;
-            outR[i] += zi * v.panR;
+            for (int k = 0; k < m; ++k)
+            {
+                const float nr = pr[k] * zr[k] - pi[k] * zi[k] + x[k];
+                const float ni = pr[k] * zi[k] + pi[k] * zr[k];
+                zr[k] = nr;
+                zi[k] = ni;
+                tl[k] = ni * panL[k];
+                tr[k] = ni * panR[k];
+            }
+            outL[i] = sumLanes (tl, m);
+            outR[i] = sumLanes (tr, m);
         }
 
-        if (v.startDelay == 0 && v.exciteRemaining == 0 && v.zr * v.zr + v.zi * v.zi < kSilenceThreshold)
-            v.active = false;
+        for (int k = 0; k < count; ++k)
+        {
+            auto& v = voices[(size_t) slotVoice[k]];
+            v.zr = zr[k];
+            v.zi = zi[k];
+            if (v.startDelay == 0 && v.exciteRemaining == 0 && v.zr * v.zr + v.zi * v.zi < kSilenceThreshold)
+                v.active = false;
+        }
     }
 
     // Structural contact distortion: loose slabs slap their frames (one-sided clip), then DC-block.

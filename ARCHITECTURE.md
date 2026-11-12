@@ -9,24 +9,27 @@ breach under the mechanical stress of the incoming audio, then heal (or don't).
 CMakeLists.txt                 JUCE 8 via FetchContent; RB_CORE_ONLY=ON builds core + tests only
 Source/
   Parameters.{h,cpp}           APVTS layout + wait-free ParameterCache::snapshot()
-  Presets.{h,cpp}              28 factory presets (host programs + editor preset bar)
-  PluginProcessor.{h,cpp}      AudioProcessor: buses (+ sidechain), oversampling, gains, limiter, state
-  PluginEditor.{h,cpp}         Header, Room page (house + controls), Engine page, info column
-  UI/Theme.h                   Palette tokens, platform fonts (DIN / Bahnschrift), LookAndFeel
-  UI/Widgets.h                 Knob (3 sizes) / ChoiceBox / Segmented / Chip / MomentaryButton
-  UI/Help.h                    Info column text for every control and display
+  Presets.{h,cpp}              28 factory presets with tags (host programs + the browser)
+  PresetLibrary.{h,cpp}        Factory + user presets: search, tags, save, modified state (see 5b)
+  PluginProcessor.{h,cpp}      AudioProcessor: buses (+ sidechain), oversampling, gains, limiter, bypass, meters, state
+  PluginEditor.{h,cpp}         The console: header, rails, display, controls, footer; scaling (see 5d)
+  UI/Theme.h                   Design tokens: colours, type, icons; the LookAndFeel declaration
+  UI/Widgets.{h,cpp}           Knob, ToggleBox, ActionButton, Segmented, ChoiceBox, IconButton, StereoMeter; LookAndFeel
+  UI/PresetBrowser.{h,cpp}     Search + category + tag browser, save form
+  UI/Help.h                    Info-line text for every control and display
+Resources/fonts/               Barlow Semi Condensed, JetBrains Mono (SIL OFL, licences alongside), embedded
   UI/LiveState.h               UI-side copy of the telemetry: frame, flashes, fractures, history
   UI/HouseView.{h,cpp}         The room as a house: damage generation, debris, camera, mouse (see 5e)
   UI/HousePaint.cpp            Everything the house view draws
   UI/HouseModel.h              The house's measurements, materials and outsides (private to the two above)
   DSP/                         JUCE-free, real-time-safe core (compiled and tested here)
-    DspUtils.h                 TPT one-pole / SVF, Catmull-Rom delay, allpass, xorshift RNG
+    DspUtils.h                 TPT one-pole / SVF, Catmull-Rom delay, allpass, xorshift RNG, fastSin / fastTan
     Materials.h                11 material profiles (3 core + 8 dark cinematic) + impact voicing and blurbs
     Voids.h                    7 exterior void profiles (what lies beyond a breach)
     WallState.h                Wall enum, damage-phase curves, FractureEvent
     StressTracker.{h,cpp}      Kinetic Stress Analyzer + integrity model
     EarlyReflectionEngine.*    24-tap shoebox image-source ER with jitter + scatter
-    DynamicFDN.{h,cpp}         8-line Householder FDN with bleed + morphing loop filters, ExteriorTank
+    DynamicFDN.{h,cpp}         16-line Hadamard FDN with bleed + morphing loop filters, ExteriorTank
     ModalDebrisGenerator.*     32-voice complex-resonator debris, chatter, contact rattle
     ImpactGenerator.{h,cpp}    Fracture weight: sub boom, crack transient, rubble grains + rumble bed
     Telemetry.h                Triple buffer + atomics, audio → UI
@@ -80,10 +83,13 @@ booms land in time with the delayed reverb. The dry signal never touches the res
   noise or instability.
 * There is no allocation, no locking and no system call on the audio thread. Buffers are sized in
   `prepare()` for the largest room (size 2.0, fully breached, plus creak headroom).
-* **Click-free automation.** Every user control glides: Size (log glide, 0.4 s), low/high cut
+* **Click-free automation.** Every user control glides: Size (two smoothers in a row, 0.4 s in all, so the
+  glide starts with no jump in speed: every delay line follows Size, and a kink there ticks), low/high cut
   (log glide, 50 ms), tone and wet/width/duck gains (per-sample linear ramps between ticks), drive
   (blend ramp, so 0 % is bit-exact bypass but switching it on never steps), density (allpass gain
-  ramped per sample). Pre-delay changes do not move the read head: two taps crossfade over 40 ms.
+  ramped per sample), Mix (equal-power gains taken once per tick and ramped, not a sin/cos per sample).
+  Pre-delay changes do not move the read head: two whole-sample taps crossfade over 40 ms, so the
+  pre-delay never interpolates and nothing is lost off the top end.
   Test 11 jumps each control mid-signal and compares the worst sample step to the clean signal's.
 * **Impact soft knee.** The fracture impact is linear below 0.5 and `0.5 + 0.4·tanh((a−0.5)/0.4)`
   above, so stacked detonations stay under the limiter (worst pre-limiter preset peak 1.14, was 1.30).
@@ -143,7 +149,7 @@ breach(I) = smoothstep(0.3 → 0.0)                  venting, loss, bleed, exter
 ### 4.3 Dynamic Early Reflections — `EarlyReflectionEngine`
 
 Shoebox 14 × 10 × 5.5 m × Size. Taps: 6 first-order + 12 second-order on perpendicular walls
-+ 6 second-order on opposite walls (both orders) = 24, all read from one Catmull-Rom delay line.
++ 6 second-order on opposite walls (both orders) = 24, all read from one delay line.
 
 ```
 R_w    = reflectivity · (1 − breach_w)              breached walls stop reflecting
@@ -157,33 +163,72 @@ n(t)   = per-tap random walk, low-passed to ~5 Hz
 Taps are panned from the image's azimuth with an equal-power law. Diffuser feedback rises with mean
 damage, from 0.45 to 0.75.
 
+* **Each bounce loses treble.** The source passes a first-order shelf (the material's damping corner,
+  depth √hfShelfGain) on its way into the line, and the second-order images pass it once more, so
+  later reflections are darker. Corner and depth ramp across a tick; a stepped corner ticks.
+* **A tap that is not moving reads a whole sample**: no interpolation and no treble loss. Taps only
+  use an interpolated read while a wall is cracked (jitter) or the room is resizing: Catmull-Rom at
+  44.1/48 kHz, linear once the engine runs oversampled (under 0.5 dB at 10 kHz there).
+* The four mixes (specular L/R, diffuse L/R) are dot products over gain arrays, summed as trees
+  rather than one 24-long chain of additions, so they vectorise. Gains, jitter depths and the
+  diffusers are only recomputed or run when the walls, the material or the size have moved.
+
 ### 4.4 Late Tank — `DynamicFDN`
 
-* 8 lines of 31.7–79.3 ms × Size × (1 + 0.12·breach). Loose lines wobble slowly ("creak").
-  Each line belongs to two walls (N–S, E–W, C–F, N–E, S–W, C–N, F–E, W–C).
+* **16 lines** of 20.6–91.5 ms × Size × (1 + 0.12·breach), 784 ms in total: 0.78 modes per Hz,
+  twice the density of the earlier 8-line tank. The lengths are spread over two octaves and chosen
+  so that no pair sits near a simple ratio (2:1, 3:2 …), which would stack modes on the same
+  frequencies. Loose lines wobble slowly ("creak"). Each line belongs to two walls: all 15 wall
+  pairs, plus floor–ceiling twice.
 * **Matrix with diagonal bleed:**
-  `A(b) = (1−b)·H + b·I` with `H = I − (2/N)·11ᵀ`, applied as `y = x − (1−b)(2/N)Σx` (O(N)).
-  The eigenvalues are 1 (N−1 times) and 2b − 1, so `|λ| ≤ 1` for every b. As walls breach, the lines
-  decouple into combs and the uniform mode turns lossy, but the matrix never adds energy.
-  `b = clamp(0.9·meanBreach + 0.3·meanLoose, 0, 0.95)`.
-  Per-row bleed (`diag(1−b_k)H + diag(b_k)`) can have gain > 1, which is why `b` is one global value.
+  `A(b) = (1−b)·H + b·I` with `H = H16/4`, applied as a fast Walsh–Hadamard transform: 64 additions,
+  no multiplies. Every line feeds every other equally (|h| = 1/4), so echo density grows as
+  16^passes. A Householder matrix at this size keeps 1 − 2/N of each line on itself: the lines act
+  as weakly coupled combs and density builds slowly (measured: 0.53 at 200 ms, against 0.75 now,
+  with the input diffusers off). H is orthogonal and symmetric with eigenvalues ±1, so A(b) has
+  eigenvalues 1 and 2b − 1 and `|λ| ≤ 1` for every b. As walls breach, the lines decouple into combs,
+  but the matrix never adds energy. `b = clamp(0.9·meanBreach + 0.3·meanLoose, 0, 0.95)`.
+  Per-row bleed can have gain > 1, which is why `b` is one global value.
+* **Input and output patterns are bent sequences.** A ±1 pattern that is a Walsh function would be
+  focused by H into a single line on every other pass. A bent sequence has a flat Walsh spectrum, so
+  H maps it to another ±1 pattern and the energy stays spread over all 16 lines. The four patterns
+  (in L, in R, out L, out R) are mutually orthogonal, which keeps the outputs decorrelated (0.03).
+* **Decay.** Loop gain per line is `10^(−3·D/(T60·fs))`, and the shelf is raised to the same power
+  of D, so every line loses the same amount per second at every frequency. Measured against a 3 s
+  setting: 3.06 / 3.00 / 2.99 s at 250 / 500 / 1 k.
 * **Loop filter per line, morphing in three stages:**
   1. **High-shelf damping** (TPT one-pole shelf). Fades out as `max(loose, breach)` rises.
   2. **Loose-slab bell** at the material's per-wall slab frequency:
      `(1 + (G−1)·k·BP)/G` with `G = 20·loose dB`. Peak gain is exactly 1 and everywhere else 1/G, and
      the line gain is stretched to `g_RT^(1−0.6·loose)`. The slab mode rings on while the rest of the
      tail dies.
-  3. **High-pass venting**, 12 Hz (a DC guard when intact) up to 912 Hz when void, with broadband
+  3. **High-pass venting**, 12 Hz as a breach begins up to 912 Hz when void, with broadband
      loss `× (1 − 0.65·breach)`.
 
   Each stage has |H| ≤ 1 and the line gain is < 1, so the loop stays stable in every state. The test
   harness checks this in each damage phase at Decay 12 s and Size 2.
+
+  Stages 2 and 3 are exact pass-throughs while no wall is loose or breached, so they are skipped for
+  an intact room and their state is cleared as they switch off. Filter state is stored
+  structure-of-arrays (one array per quantity), so each stage is one element-wise loop over 16
+  lines that the compiler turns into SIMD; sums are fixed trees, so they vectorise without relaxing
+  floating-point rules. The shelf's corner and depth ramp per sample like the gains do.
+* **Control cost.** Loop gains and filter coefficients depend only on the walls, the material, Decay
+  and Size. They are recomputed only when one of those moves (a wall by more than 0.02 %), and then
+  without `pow()`: every power is an `exp()` of a rate worked out once, pre-warps use a Padé `tan`,
+  and the per-line drift oscillators are rotating phasors.
 * **Exterior void.** Each line's vented energy, `breach·(x − (1 − 0.65·breach)·hp)`, is summed into
   the `ExteriorTank`, a 4-line FDN configured by a `VoidProfile` (`Voids.h`). Free Field Loss
   discards it: the tank's input ramps to 0 over one tick, and whatever is already outside rings out.
   * Line lengths glide over ~150 ms when the void changes, with a slow per-line LFO for water or
     heat-haze wobble.
   * Loop gains come from the void's RT60, followed by an in-loop low-pass for darkness/distance.
+  * One allpass sits inside each loop (24–54 ms, gain 0.55 × diffusion). It is lossless, so
+    stability is untouched, but every pass is smeared: a smooth void stays smooth instead of
+    repeating what was vented into it, and echo voids (low diffusion) keep their echoes. The loop
+    gain accounts for the allpass's delay.
+  * When nothing is coming in and nothing above −140 dB is circulating, the tank stops running
+    until a breach feeds it again (always, for Free Field Loss).
   * The matrix is `A = I − d·(2/N)·11ᵀ`, with eigenvalues 1 and 1 − 2d, so |λ| ≤ 1 for any
     diffusion d. Low diffusion decouples the lines into discrete echoes (Concrete Canyon) or flutter
     (Industrial Tunnel).
@@ -194,7 +239,7 @@ damage, from 0.45 to 0.75.
   | Void | Lines (ms) | RT60 | Damp | Diffusion | Wobble | Grit | Character |
   |---|---|---|---|---|---|---|---|
   | Free Field Loss | — | — | — | — | — | — | Vented energy is lost; a breached room just gets drier |
-  | Infinite Secondary Tail | 114–242 | 45 s | 1.4 kHz | 1.0 | — | — | Distant, endless wash |
+  | Infinite Secondary Tail | 114–242 | 45 s | 1.4 kHz | 1.0 | 1 ms @ 0.09 Hz | — | Distant, endless wash |
   | Industrial Tunnel | 41–62 | 7 s | 3.8 kHz | 0.35 | 0.3 ms | — | Metallic flutter echoes |
   | Abyssal Drone | 311–691 | 90 s | 600 Hz | 1.0 | 2.5 ms @ 0.07 Hz | — | Bottomless, dark, slowly moving |
   | Burning City | 97–223 | 14 s | 5 kHz | 0.9 | 0.8 ms | drive 6 | Distorted, gritty exterior |
@@ -214,6 +259,9 @@ damage, from 0.45 to 0.75.
   events/s. Each event is a small high-pitched fragment. Chatter energy decays with τ = 0.6–1.8 s.
 * **Contact rattle.** A one-sided soft clip at a gap that shrinks with looseness (the slab slapping its
   frame), mixed in by `rattleAmount · looseness`, then a 20 Hz DC blocker.
+* **Voices run side by side.** The resonators are independent, so the ringing ones are packed into
+  arrays and every sample advances all of them at once (SIMD), instead of each voice running its own
+  serial loop over the block. With all 32 ringing this costs 22 ns per sample (it was 121).
 
 ### 4.6 Impact — `ImpactGenerator`
 
@@ -230,6 +278,11 @@ The modal debris gives a fracture its pitch; this layer gives it weight. Voiced 
   fracture adds to (it settles over 2.5 s). Loose walls under load keep it trickling.
 * **Shock** (in `Engine`): a fracture envelope (τ 0.35 s) that stretches every FDN line by up to
   1.6 %, so the room's pitch flexes on big hits.
+
+The crack and rubble voices (up to 24 band-passed noise bursts) are advanced together the same way
+as the debris voices: noise generators, filters and envelopes in vector steps. The booms use a
+polynomial sine (error below −120 dB) instead of two library calls per sample. A busy collapse
+costs 47 ns per sample (it was 136).
 
 Impact scales boom, crack and shock; Rumble scales the rubble. DETONATE (`StressTracker::detonate`)
 removes a material-scaled chunk from every wall and emits a full-magnitude event per wall.
@@ -297,6 +350,7 @@ the room's own pre-delay. With Drive at 100 % on a 7 kHz sine, energy off the ha
 | `output` *(v2)* | Output Gain | −24…+12 dB, 0 | after the mix |
 | `limiter` *(v2)* | Safety Limiter | bool, on | soft knee −1…0 dBFS |
 | `oversampling` *(v2)* | Oversampling | Off / 2x / 4x, 2x | active engine |
+| `bypass` *(v3)* | Bypass | bool, off | 20 ms crossfade to the untouched input; the host's bypass (`getBypassParameter`) |
 
 The v2 parameters use `ParameterID` version hint 2, so hosts keep the v1 automation order. Presets
 set the sound controls (Impact through Ducking). They leave Oversampling, Input/Output Gain, the
@@ -308,11 +362,23 @@ relaxed loads.
 
 ## 5b. Factory presets
 
-There are 28 presets, defined in `Source/Presets.cpp`. They appear in the editor's preset bar
-(grouped menu, ‹ › buttons, one-line description) and in the host's own preset menu (AU factory
-presets / VST3 programs). Loading a preset sets every parameter and gives you a fresh room:
-pristine, or the preset's own starting damage for the presets that start as ruins. The session remembers
-which preset it was based on.
+There are 28 presets, defined in `Source/Presets.cpp`. They appear in the editor's preset browser
+and in the host's own preset menu (AU factory presets / VST3 programs). Loading a preset sets every
+sound parameter (`kPresetParamIds`) and gives you a fresh room: pristine, or the preset's own
+starting damage for the presets that start as ruins. The session remembers which preset it was based on.
+
+Every preset carries tags from a fixed vocabulary of 17 (`presetTagVocabulary()`), in three groups:
+use (Vocals, Drums, Bass, Keys & Pads, Sound FX), behaviour (Unbreakable, Fragile, Self-healing,
+Permadeath, Starts ruined) and sound (Short, Long tail, Dark, Bright, Metallic, Gritty, Wide).
+
+`PresetLibrary` (owned by the processor, message thread) lists the factory presets and the user's
+own `.rbpreset` files (small XML: name, tags, plain parameter values) from
+`~/Library/Application Support/RoomBreaker/Presets` on macOS (not Documents: macOS asks permission
+before a plug-in may read it) and `%APPDATA%\RoomBreaker\Presets` on Windows. Search matches every
+word against name, category, tags and description, with name matches first; tags combine with AND;
+the category narrows further. The library remembers the values it loaded, so the header can mark the
+preset as modified. Presets never touch Input/Output gain, oversampling, the limiter, the stress
+source or bypass, so browsing never jumps the level or the CPU load.
 
 | # | Preset | Use it on | What it does (from the 10 s audition) |
 |---|---|---|---|
@@ -383,31 +449,109 @@ end of these tables.
 
 ## 5d. Editor
 
-1280 × 800 design size, scaled with a fixed aspect ratio (60–160 %). Three columns: the house and
-its read-outs (600 px), the sound controls (400 px) and the info column (280 px).
+One console, laid out once at **1200 × 750 design units on an 8 px grid** and scaled as a whole.
+The house is the only bright, busy thing on it; everything else is quiet so the picture and the
+numbers read first. Level flows left to right: input rail, the room, the controls, output rail.
 
-* **Header**: wordmark, Room / Engine tabs, preset menu with ‹ ›, Detonate and Rebuild, Input /
-  Dry/wet / Output, Oversampling (segmented), Freeze (switch), engine status and In/Out meters.
-* **Room page**: the house (5e), a six-column wall survey (integrity and load vs yield per surface)
-  and a 12 s stress history. On the right: Material and Outside, then four rows (Structure,
-  Destruction, Space, Tone), each led by one large knob, and the preset notes.
-* **Engine page**: a plain settings sheet. Oversampling, Safety limiter, Ducking with the live room
-  level, and What breaks the walls (Input / Sidechain / Both) with the key meter.
-* **Info column** (every page): explains whatever the mouse is over, using each widget's `info` key,
-  `Help.h`, the live value and default. Otherwise it shows the room's status and how to read the house.
+```
++--------------------------------------------------------------------------------+
+| ROOMBREAKER 2.5.0      [<][>]  Preset name ........ CATEGORY v  [save]  ACTIVE 100% (o) |  48
++------+-------------------------------------+---------------------------+-------+
+| IN   |                                     | ROOM   Material  Outside  | OUT   |
+| -3.2 |  the house                          | STRUCTURE    o  o  o  o   | -0.4  |
+| ||   |  condition readout (top left)       | DESTRUCTION  o  o  o  o   | ||    |
+| ||   |  hovered surface, turn hint         | SPACE        o  o  o  o   | MIX   |
+| INPUT|  BYPASSED when bypassed             | TONE         o  o  o  o   | DUCK  |
+| BREAK|                                     | [FREEZE] [REBUILD] [DETONATE] | OUTPUT|
++------+-------------------------------------+---------------------------+-------+
+| info line: what the mouse is over             OVERSAMPLING [1x 2x 4x] [LIMITER] 48 kHz  cpu |  32
++--------------------------------------------------------------------------------+
+   88                    624                              392              88
+```
 
-**Visual rules** (written against the common "AI-made UI" complaints: purple gradients, glowing
-cards, coloured side bars, emoji, rainbow status colours, every control the same size):
+**Hierarchy.** Three levels and no more: the house (the only colour image); values (13 pt mono,
+brightest text); everything else (labels, hairlines, chrome) in two steps of grey. Sixteen sound
+knobs sit in four labelled sections of four, in the order you would set them: what the room is,
+how it breaks, its size and time, its colour. The I/O gains, Mix and the meters are on the rails at
+the two ends of the signal, always visible, never behind a menu. Engine settings (oversampling,
+limiter) live in the footer because you set them once.
 
-* One accent colour, hot orange, and it means destruction only (Detonate, fractures, overload).
-  Everything else is warm greys plus one ink colour.
-* No cards, no drop shadows on panels, no coloured stripes. Sections are a sentence-case heading
-  and a hairline.
-* Hierarchy by size: one large knob per row for the control that matters most.
-* Every option visible where there are few: segmented buttons instead of menus for 2–3 choices,
-  switches for on/off, text tabs with an underline.
-* Text contrast ≥ 4.5:1 against its panel. Fonts are platform native (DIN on macOS, Bahnschrift on
-  Windows), not a web default.
+**Colour** (`Theme.h`, namespace `C`). Six greys do all the structure. Two colours carry meaning,
+and they mean the same thing everywhere.
+
+| Token | Hex | Used for | Contrast on `bg1` |
+|---|---|---|---|
+| `bg0` | `#111315` | window, rails, wells (meters, fields) | |
+| `bg1` | `#181B1E` | panels: header, controls, footer, browser | |
+| `bg2` | `#202428` | raised: buttons, knob caps | |
+| `bg3` | `#2A2F34` | raised under the mouse, selected rows | |
+| `line` | `#2C3136` | hairlines between areas | |
+| `edge` / `edgeHi` | `#3A4046` / `#4D555C` | control outlines and knob track / the same under the mouse | |
+| `text0` | `#E9E5DD` | values, names: anything you read | 13.8 : 1 |
+| `text1` | `#A7ADB2` | labels | 7.6 : 1 |
+| `text2` | `#868E95` | units, hints, scales, disabled | 5.2 : 1 |
+| `accent` | `#F0A43C` | what you are touching or have selected; caution (bypassed, −6…0 dBFS) | 8.3 : 1 |
+| `danger` | `#EF5B4F` | damage, over 0 dBFS, Detonate | 5.2 : 1 |
+| `meter` | `#9FC2B6` | meter body below −6 dBFS | 8.9 : 1 |
+
+Every text colour passes WCAG AA (4.5 : 1) on `bg0`, `bg1` and `bg2`; on `bg3`, used only under the
+mouse and for the selection, `text2` drops to 4.1 : 1, so highlighted text uses `text1` or brighter. Nothing glows. The knob caps are the one gradient
+(two stops, lit from above), because the cap is the one place where a physical cue helps:
+it says "grab here".
+
+**Type.** Two embedded families, so Windows and macOS render identically; three sizes, nothing else.
+
+| Role | Face | Size (pt) |
+|---|---|---|
+| Labels, section heads, buttons (always capitals, tracked +7 %) | Barlow Semi Condensed SemiBold | 11 |
+| Body: help line, menus, fields, preset list | Barlow Semi Condensed Medium | 13 |
+| Preset name, wordmark | Barlow Semi Condensed SemiBold | 16 |
+| Values | JetBrains Mono | 13 |
+| Meter scales, readouts, status | JetBrains Mono | 11 |
+
+Barlow is a grotesque drawn from road signage: condensed enough for 16 labels in a column, and
+legible at 11 pt. Values are monospaced so they don't jitter while you drag.
+
+**Icons.** Nine (prev, next, caret, search, save, close, power, folder, trash) on a 16 × 16 grid,
+1.5 px stroke, square caps, mitred joins, no fills, on 32 px click targets (`iconPath`).
+
+**Shape.** 3 px radius on controls, 0 on areas. Areas are separated by 1 px hairlines, not boxes
+or shadows.
+
+**Controls** (`Widgets.h`). Each one talks to its parameter through a JUCE attachment, so every
+edit reaches the host as one begin / set / end gesture (touch automation, undo and latch work).
+
+| Control | Used for | Interaction |
+|---|---|---|
+| `Knob` | all 20 continuous parameters | Drag up/right, 250 screen points for the full range, in screen points so it feels the same at every scale; Shift = 10x finer, incremental so pressing Shift mid-drag never jumps. The pointer hides while dragging and returns where it went down. Wheel: 2 % per notch, Shift 0.2 %; trackpads scroll continuously; fractional steps add up on stepped parameters. Double-click: type a value, units optional ("120 ms", "4.5k", "-6", "permadeath"); Return or clicking away applies, Escape cancels, nonsense is ignored, values clamp. Alt- or Cmd/Ctrl-click: default. Right-click: type, reset, and the host's own items for the parameter (`getContextMenuForParameter`). Hover or drag: the arc and the value turn amber and the default is ticked on the scale. Bipolar parameters (Width, the gains) draw the arc from their centre. Knobs never take keyboard focus, so the host's space bar keeps working. |
+| `Segmented` | Oversampling, Break by | All options visible; the selected one is lit with an amber bar. |
+| `ChoiceBox` | Material (11), Outside (7) | Drop-down; the wheel steps through it. |
+| `ToggleBox` | Freeze, Limiter | A switch with an LED: amber when on. The body stays neutral, because "Limiter on" is normal and must not shout. |
+| `ActionButton` | Rebuild, Detonate (red outline) | Momentary: the parameter is 1 while held, as one gesture. |
+| `StereoMeter` | input (after Input gain), output (after the limiter) | −60…+6 dBFS, linear in dB. Solid = RMS (300 ms), light = peak falling 24 dB/s, white line = 1.5 s hold. Colour by zone, never by gradient: sage, amber from −6, red over 0. The number above is the highest peak so far, boxed red after a true over; click to reset. |
+
+**Status.** Header: ACTIVE / BYPASSED next to the power switch (BYPASSED in amber); the display
+dims and says BYPASSED. Preset: an amber dot before the name once anything moved since it was
+loaded. Footer: session rate, the room engine's rate when oversampled, CPU.
+
+**Preset browser** (`PresetBrowser`). Opens over the display and controls from the preset name;
+the meters stay visible. Search field (focused on open), categories with live counts, tag chips
+(AND), a list of name / tags / category, and the selected preset's description. Each preset loads
+as it is selected, so Up/Down audition; Return keeps it, Escape clears the search then closes,
+double-click loads and closes. Save as... asks for a name and tags (pre-filled from the current
+preset); Delete moves a user preset's file to the Trash; the folder button reveals the presets
+folder. The header's ‹ › step through every preset without opening it.
+
+**Scaling** (`RoomBreakerAudioProcessorEditor::resized`). Everything lives in one `Canvas` component
+at design size; resizing only changes its `AffineTransform`. The constrainer locks the aspect
+ratio (75–200 %, corner handle or the size menu), and a host that forces another shape gets the
+largest fit, centred. Because JUCE renders text and paths as vectors through the transform, nothing
+is a stretched bitmap; the house's cached layers render at the physical pixel density (half steps,
+up to 3x), so Retina and Windows scaling stay sharp. Drag sensitivity is measured in screen
+points, so knobs feel the same at every size. The scale is saved with the session.
+
+**Info line.** The footer explains whatever the mouse is over (the first sentence of `Help.h`), and
+otherwise how the knobs work. It follows the mouse through a listener on the canvas.
 
 ## 5e. The house
 
@@ -487,7 +631,8 @@ Code that needs a consistent snapshot of all six walls uses frames.
 ## 7. State persistence
 
 `getStateInformation` stores the APVTS tree plus a `<Structure wall0..wall5>` child read from the
-atomics. A wrecked or permadeath room reopens exactly as it was left. `setStateInformation` strips
+atomics, the factory program, the user preset in use (`presetUser`, `presetName`) and the editor
+size (`uiScale`). A wrecked or permadeath room reopens exactly as it was left. `setStateInformation` strips
 that child, hands it to the audio thread, and replaces the APVTS state. `Engine::prepare` keeps
 current damage across sample-rate changes, unless a recalled state is already waiting.
 
@@ -510,19 +655,20 @@ cmake --build build -j8                          # VST3, AU, Standalone, both te
 | 64- vs 333-sample host blocks | max diff 3.9e-7 |
 | Telemetry: late UI gets newest frame; overwritten cracks still delivered; 1.28 M concurrent reads | no torn or out-of-order frames |
 | AddressSanitizer + UndefinedBehaviorSanitizer, ThreadSanitizer | clean |
-| CPU (core, 1x) | ~120× real time, one core, Apple Silicon (v1: ~184×; the new stages cost the difference) |
-| CPU (plugin, 10 s noise) | 1x 159×, 2x 79×, 4x 39× real time |
-| Quality: Motion | tail ringing 5.0 → 4.4 → 4.1 dB (Motion 0 / 25 / 60 %) |
-| Quality: Density | echo density 30–120 ms 0.30 → 0.60 (Density 0 / 70 %) |
+| CPU (core, 1x) | ~135× real time, one core, Apple Silicon. Per sample: 105 ns intact (was 123), 105 ns while being destroyed (was 125), 144 ns cracked but static (was 131: 24 interpolated reflections plus twice the tank lines) |
+| CPU (plugin, 10 s noise) | 1x 155×, 2x 95×, 4x 45× real time |
+| Quality: Motion | tail ringing 4.6 → 4.5 → 4.0 dB (Motion 0 / 25 / 60 %) |
+| Quality: Density | echo density 30–120 ms 0.34 → 0.70 (Density 0 / 70 %). Tank alone at 70 %: fully dense (1.0) by 120 ms, was 200 ms |
 | Sanitizers | core harness under ASan + UBSan: all checks pass, 0 reports |
 | Rate independence | mean integrity on the same script 0.306 / 0.305 / 0.304 at 48 / 96 / 192 kHz |
 | Automation clicks (test 11): 17 controls jumped mid-signal | worst step ≤ 3× clean (Drive 0→100 % ≤ 6×, Size ≤ 4.5×, Material ≤ 4×) |
 | Fuzz (test 12): 40 s of random parameter jumps on noise and hits | finite, bounded |
-| `auval -strict -v aufx RmBk Rbrk` (installed AU) | AU VALIDATION SUCCEEDED, 0 warnings, 28 factory presets listed |
+| `auval -strict -v aufx RmBk Rbrk` (installed AU, 2.5.0) | AU VALIDATION SUCCEEDED, 28 factory presets listed |
 
 Plugin smoke test (`rb_plugin_smoke`, the real `AudioProcessor`):
 
-* **Parameters and buses:** 28 parameters with correct defaults and display text. Stereo,
+* **Parameters and buses:** 29 parameters with correct defaults and display text; the bypass
+  parameter is the host's. Stereo,
   mono-to-stereo and a stereo sidechain are accepted; 5.1 is rejected.
 * **Processing and state:** random host block sizes (1–1024) stay finite and bounded. Damage and
   parameters survive save/recall. Rebuild fires once on its rising edge.
@@ -534,9 +680,21 @@ Plugin smoke test (`rb_plugin_smoke`, the real `AudioProcessor`):
   * The limiter holds a +12 dB detonation at 1.000.
   * Oversampling lowers aliasing and switches click-free (largest step 0.041) while keeping the room's damage; the old tail fades over 1.2 s.
   * A sidechain key breaks the room while Input mode ignores it.
-* **Editor:** it builds and renders six snapshots after pumping audio through the plugin:
-  pristine, damaged, detonated, from behind, info column and engine page. It then poses the house
-  at set damage levels in every material for the gallery and times a repaint.
+* **Bypass and meters:** both meter channels follow the signal; after the 20 ms fade the bypassed
+  output equals the input (largest difference 1.5e-8); un-bypassing stays finite.
+* **Preset library** (in a temporary folder, never the user's): search, tag AND, category, the
+  tag vocabulary, factory load sets the host program, the modified mark, save / reload a user
+  preset, gains untouched by presets, a session that remembers its user preset.
+* **Knobs:** typed values with and without units, nonsense ignored, clamping; wheel 2 % per notch
+  and 0.2 % with Shift, fine steps adding up on a 0.1 dB parameter; reset; every edit one complete
+  host gesture (18 begun, 18 ended).
+* **Scaling:** 150 % is 1800 × 1125 with the canvas still 1200 × 750 inside; the size survives a
+  save / load; it clamps at 75 % and 200 %.
+* **Browser:** search and tag filtering through the UI.
+* **Editor:** snapshots after pumping audio through the plugin (pristine, damaged, detonated, from
+  behind, the browser, the info line) plus 2x close-ups of the controls, header and meter, and a
+  150 % crop. It poses the house at set damage levels in every material for the gallery and times
+  a repaint.
 
 Material personalities on the same script, with permadeath:
 
@@ -559,7 +717,15 @@ Material personalities on the same script, with permadeath:
   so its tail is not carried into the new rate.
 * Windows: CI (GitHub Actions, `windows-latest`, MSVC) builds the VST3 and Standalone and runs both
   test programs. The plugins are unsigned, and Windows has not been tested in a DAW.
-* The INFO panel follows the mouse. Keyboard focus does not drive it yet.
-* SIMD: the 8-line FDN and the 24 ER taps map directly onto 4- or 8-wide vectors if CPU ever matters.
+* The info line follows the mouse only; keyboard focus does not drive it. Knobs deliberately take
+  no keyboard focus (so the host keeps its shortcuts), which also means no arrow-key adjustment.
+* Not yet tried by hand in a DAW: the hidden-pointer drag (`enableUnboundedMouseMovement`), the
+  host context menu items, and text entry in hosts that keep keyboard focus for themselves.
+* SIMD is left to the compiler: the hot loops are written as element-wise passes over arrays (tank
+  filters, tap mixes, debris and impact voices). Hand-written intrinsics could still gain on the 64
+  scattered delay reads per sample in the tank, which is now its largest cost.
+* In the tank, Catmull-Rom reads lose up to 1 dB at 12 kHz per pass at 48 kHz when a line sits
+  between samples. The materials' own damping is several times larger, and the loss vanishes at
+  2x/4x, so it is left alone.
 * Possible additions: preset morphing between materials, MIDI-triggered demolition (DETONATE is
-  already automatable), user preset save/load.
+  already automatable), A/B compare and undo in the header, a "lock Mix while browsing" option.

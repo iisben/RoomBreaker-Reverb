@@ -13,3 +13,6 @@ renders/
 *.wav
 
 .DS_Store
+
+# local logs
+*.log

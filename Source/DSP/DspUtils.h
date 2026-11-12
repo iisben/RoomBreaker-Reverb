@@ -27,6 +27,35 @@ inline float smoothstep (float edge0, float edge1, float x) noexcept
     return t * t * (3.0f - 2.0f * t);
 }
 
+/** sin(x) for x in [0, 2π], 7th-order minimax polynomial after folding: error below -120 dB.
+    Used where a sine is needed every sample (the impact booms). */
+inline float fastSin (float x) noexcept
+{
+    x -= kPi;                                             // [-π, π], sign flipped
+    x = x > kHalfPi ? kPi - x : (x < -kHalfPi ? -kPi - x : x);
+    const float x2 = x * x;
+    return -x * (0.99999660f + x2 * (-0.16664824f + x2 * (0.00830629f - x2 * 0.00018363f)));
+}
+
+/** tan(x) for x in [0, 0.49π] (filter pre-warping), Padé [5/4]: exact to 1e-6 below a quarter of the
+    sample rate, 0.03 % off at the very top,
+    with no library call. Used where many filter coefficients are recomputed per control tick. */
+inline float fastTan (float x) noexcept
+{
+    const float x2 = x * x;
+    return x * (945.0f - 105.0f * x2 + x2 * x2) / (945.0f - 420.0f * x2 + 15.0f * x2 * x2);
+}
+
+/** Sum of n values (n a multiple of 8) as eight lanes: short chains that overlap and vectorise. */
+inline float sumLanes (const float* a, int n) noexcept
+{
+    float lane[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+    for (int k = 0; k < n; k += 8)
+        for (int j = 0; j < 8; ++j)
+            lane[j] += a[k + j];
+    return ((lane[0] + lane[1]) + (lane[2] + lane[3])) + ((lane[4] + lane[5]) + (lane[6] + lane[7]));
+}
+
 /** Pole for a one-pole smoother with time constant tau, evaluated at rateHz. */
 inline float onePoleCoeff (float tauSeconds, float rateHz) noexcept
 {
@@ -121,6 +150,20 @@ public:
 
     float tapInt (int d) const noexcept { return buffer[(writePos - (uint32_t) d) & mask]; }
 
+    /** The four samples around a fractional tap and its fraction, for callers that interpolate
+        many lines at once (see catmullRom). Same clamping and convention as tap(). */
+    void fetch (float d, float& p0, float& p1, float& p2, float& p3, float& frac) const noexcept
+    {
+        d = std::clamp (d, 2.0f, maxDelay());
+        const int i = (int) d;
+        frac = d - (float) i;
+        const uint32_t idx = writePos - (uint32_t) i;
+        p0 = buffer[(idx + 1u) & mask];
+        p1 = buffer[idx & mask];
+        p2 = buffer[(idx - 1u) & mask];
+        p3 = buffer[(idx - 2u) & mask];
+    }
+
     float tap (float d) const noexcept
     {
         d = std::clamp (d, 2.0f, maxDelay());
@@ -141,6 +184,15 @@ private:
     std::vector<float> buffer;
     uint32_t mask = 0, writePos = 0;
 };
+
+/** Catmull-Rom through four samples (p1 is the one at the integer tap, f runs towards p2). */
+inline float catmullRom (float p0, float p1, float p2, float p3, float f) noexcept
+{
+    const float c1 = 0.5f * (p2 - p0);
+    const float c2 = p0 - 2.5f * p1 + 2.0f * p2 - 0.5f * p3;
+    const float c3 = 0.5f * (p3 - p0) + 1.5f * (p1 - p2);
+    return ((c3 * f + c2) * f + c1) * f + p1;
+}
 
 //==============================================================================
 /** Schroeder allpass used for diffusion. */

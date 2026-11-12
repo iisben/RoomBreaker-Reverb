@@ -127,17 +127,22 @@ private:
 
     int tickPosition = 0;                 // samples into the current control tick
     WallArray smoothedIntegrity {};
-    float sizeSmoothed = 1.0f, shock = 0.0f, freezeSmoothed = 0.0f;
-    OnePoleSmoother mixSmoother, debrisSmoother;
+    float sizeSmoothed = 1.0f, sizeStage = 1.0f, shock = 0.0f, freezeSmoothed = 0.0f;
+    OnePoleSmoother debrisSmoother;
+    float mixSm = 0.35f;                                        // glided Mix
+    float wetMix = 0.0f, wetMixInc = 0.0f, dryMix = 1.0f, dryMixInc = 0.0f;   // equal-power gains, ramped per sample
+    float lowCutSet = -1.0f, highCutSet = -1.0f;                // cutoffs the filters were last set to
 
     // Pre-delay (room input and stress source both go through it, so the walls react in sync)
     DelayLine preL, preR, preKeyL, preKeyR;
     // Changes crossfade between two taps (40 ms) instead of sliding the read head: no pitch warble, no click.
-    float predelayCur = 2.0f, predelayNext = 2.0f, predelayFade = 0.0f, predelayFadeInc = 0.0f;
+    // The taps are whole samples, so the pre-delay never interpolates: nothing is lost off the top end.
+    int   predelayCur = 2, predelayNext = 2;
+    float predelayFade = 0.0f, predelayFadeInc = 0.0f;
     float tapPre (DelayLine& d) const noexcept
     {
-        const float a = d.tap (predelayCur);
-        return predelayFadeInc > 0.0f ? a + predelayFade * (d.tap (predelayNext) - a) : a;
+        const float a = d.tapInt (predelayCur);
+        return predelayFadeInc > 0.0f ? a + predelayFade * (d.tapInt (predelayNext) - a) : a;
     }
 
     // Wet post chain (targets set per tick, ramped per sample)

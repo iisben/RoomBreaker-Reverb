@@ -6,6 +6,7 @@ namespace
 {
     const juce::Identifier kStructureTag { "Structure" };
     const juce::Identifier kPresetProperty { "preset" };
+    const juce::Identifier kScaleProperty { "uiScale" };
     juce::Identifier wallKey (int w) { return juce::Identifier (juce::String ("wall") + juce::String (w)); }
 
     constexpr double kTailHandoverSeconds = 1.2;   // outgoing engine's tail fades out over this
@@ -80,6 +81,12 @@ void RoomBreakerAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
     silenceBuf.setSize (2, maxChunk);
     silenceBuf.clear();
     keyBuf.setSize (2, maxChunk);
+    engineInBuf.setSize (2, maxChunk);
+    bypassRamp.assign ((size_t) maxChunk, 0.0f);
+    bypassMix.reset (sampleRate, 0.02);
+    bypassMix.setCurrentAndTargetValue (params.bypassed() ? 1.0f : 0.0f);
+    inMs = {};
+    outMs = {};
     keyUpBuf.setSize (2, maxChunk * rb::kOversamplingFactors[rb::kNumOversampling - 1]);
     lastKeyL = lastKeyR = 0.0f;
 
@@ -232,6 +239,7 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         engines[(size_t) fadingIndex].setParams (snapshot);
 
     inGain.setTargetValue (juce::Decibels::decibelsToGain (params.inputGainDb()));
+    bypassMix.setTargetValue (params.bypassed() ? 1.0f : 0.0f);
     outGain.setTargetValue (juce::Decibels::decibelsToGain (params.outputGainDb()));
     dryGain.setTargetValue (std::cos (snapshot.mix * juce::MathConstants<float>::halfPi));
     const bool limiterOn = params.limiterOn();
@@ -240,6 +248,7 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     float* outL = buffer.getWritePointer (0);
     float* outR = buffer.getWritePointer (1);
     float peakIn = 0.0f, peakOut = 0.0f, peakKey = 0.0f, peakRaw = 0.0f;
+    std::array<float, 2> inPk {}, outPk {}, inSq {}, outSq {};
 
     for (int offset = 0; offset < numSamples; offset += maxChunk)
     {
@@ -248,14 +257,36 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         auto* dr = dryBuf.getWritePointer (1);
 
         // Dry input (mono → centred stereo) with input gain.
+        const float* inL = buffer.getReadPointer (0) + offset;
+        const float* inR = mainIn > 1 ? buffer.getReadPointer (1) + offset : inL;
+        bool bypassing = bypassMix.isSmoothing() || bypassMix.getTargetValue() > 0.0f;
         for (int i = 0; i < n; ++i)
         {
             const float g = inGain.getNextValue();
-            const float l = buffer.getSample (0, offset + i);
-            const float r = mainIn > 1 ? buffer.getSample (1, offset + i) : l;
-            dl[i] = l * g;
-            dr[i] = r * g;
-            peakIn = std::max (peakIn, std::max (std::abs (dl[i]), std::abs (dr[i])));
+            dl[i] = inL[i] * g;
+            dr[i] = inR[i] * g;
+            bypassRamp[(size_t) i] = bypassing ? bypassMix.getNextValue() : 0.0f;
+            inPk[0] = std::max (inPk[0], std::abs (dl[i]));
+            inPk[1] = std::max (inPk[1], std::abs (dr[i]));
+            inSq[0] += dl[i] * dl[i];
+            inSq[1] += dr[i] * dr[i];
+        }
+        peakIn = std::max (peakIn, std::max (inPk[0], inPk[1]));
+
+        // Bypassed, the room hears nothing (it neither rings on nor breaks), and fades in again from silence.
+        const float* engL = dl;
+        const float* engR = dr;
+        if (bypassing)
+        {
+            auto* el = engineInBuf.getWritePointer (0);
+            auto* er = engineInBuf.getWritePointer (1);
+            for (int i = 0; i < n; ++i)
+            {
+                const float keep = 1.0f - bypassRamp[(size_t) i];
+                el[i] = dl[i] * keep;
+                er[i] = dr[i] * keep;
+            }
+            engL = el; engR = er;
         }
 
         const float* kl = nullptr;
@@ -264,11 +295,12 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
         {
             auto* bl = keyBuf.getWritePointer (0);
             auto* br = keyBuf.getWritePointer (1);
-            const int scCh = scBuffer.getNumChannels();
+            const float* scL = scBuffer.getReadPointer (0) + offset;
+            const float* scR = scBuffer.getNumChannels() > 1 ? scBuffer.getReadPointer (1) + offset : scL;
             for (int i = 0; i < n; ++i)
             {
-                bl[i] = scBuffer.getSample (0, offset + i);
-                br[i] = scCh > 1 ? scBuffer.getSample (1, offset + i) : bl[i];
+                bl[i] = scL[i];
+                br[i] = scR[i];
                 peakKey = std::max (peakKey, std::max (std::abs (bl[i]), std::abs (br[i])));
             }
             kl = bl; kr = br;
@@ -276,7 +308,7 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
 
         auto* wl = wetBuf.getWritePointer (0);
         auto* wr = wetBuf.getWritePointer (1);
-        renderWet (activeIndex, dl, dr, kl, kr, wl, wr, n);
+        renderWet (activeIndex, engL, engR, bypassing ? nullptr : kl, bypassing ? nullptr : kr, wl, wr, n);
 
         if (fadingIndex >= 0)
         {
@@ -308,10 +340,21 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
             float r = (dg * dr[i] + wr[i]) * og;
             peakRaw = std::max (peakRaw, std::max (std::abs (l), std::abs (r)));
             if (limiterOn) { l = softLimit (l); r = softLimit (r); }
+            if (bypassing)
+            {
+                // Read the untouched input before this sample is overwritten (a mono input shares channel 0).
+                const float b = bypassRamp[(size_t) i];
+                l += b * (inL[i] - l);
+                r += b * (inR[i] - r);
+            }
             outL[offset + i] = l;
             outR[offset + i] = r;
-            peakOut = std::max (peakOut, std::max (std::abs (l), std::abs (r)));
+            outPk[0] = std::max (outPk[0], std::abs (l));
+            outPk[1] = std::max (outPk[1], std::abs (r));
+            outSq[0] += l * l;
+            outSq[1] += r * r;
         }
+        peakOut = std::max (peakOut, std::max (outPk[0], outPk[1]));
     }
 
     for (int ch = 2; ch < buffer.getNumChannels(); ++ch)
@@ -327,6 +370,20 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     holdMax (outPeak, peakOut);
     holdMax (keyPeak, peakKey);
     holdMax (preLimiterPeak, peakRaw);
+
+    // Meter ballistics: ~300 ms mean square (an RMS reading), peaks held for the UI.
+    const float coef = std::exp (-(float) numSamples / (0.3f * (float) hostRate));
+    for (size_t c = 0; c < 2; ++c)
+    {
+        inMs[c]  = coef * inMs[c]  + (1.0f - coef) * inSq[c]  / (float) numSamples;
+        outMs[c] = coef * outMs[c] + (1.0f - coef) * outSq[c] / (float) numSamples;
+        if (inMs[c] < 1.0e-12f) inMs[c] = 0.0f;
+        if (outMs[c] < 1.0e-12f) outMs[c] = 0.0f;
+        inMeter[c].meanSquare.store (inMs[c], std::memory_order_relaxed);
+        outMeter[c].meanSquare.store (outMs[c], std::memory_order_relaxed);
+        holdMax (inMeter[c].peak, inPk[c]);
+        holdMax (outMeter[c].peak, outPk[c]);
+    }
 }
 
 //==============================================================================
@@ -337,54 +394,39 @@ int RoomBreakerAudioProcessor::getNumPrograms()
 
 const juce::String RoomBreakerAudioProcessor::getProgramName (int index)
 {
-    const auto& presets = rb::getFactoryPresets();
-    if (index < 0 || index >= (int) presets.size())
+    const auto& factory = rb::getFactoryPresets();
+    if (index < 0 || index >= (int) factory.size())
         return {};
-    return juce::String (presets[(size_t) index].category) + " - " + presets[(size_t) index].name;
+    return juce::String (factory[(size_t) index].category) + " - " + factory[(size_t) index].name;
 }
 
 void RoomBreakerAudioProcessor::setCurrentProgram (int index)
 {
-    const auto& presets = rb::getFactoryPresets();
-    if (index < 0 || index >= (int) presets.size())
+    const auto& factory = rb::getFactoryPresets();
+    if (index < 0 || index >= (int) factory.size())
         return;
 
     currentProgram = index;
-    const auto& p = presets[(size_t) index];
+    const auto& p = factory[(size_t) index];
+    // A preset is a fresh room: pristine, or the preset's own starting damage.
+    applyPresetValues (rb::plainValues (p), p.startIntegrity);
+    presets.noteFactoryLoaded (index);
+}
 
+void RoomBreakerAudioProcessor::applyPresetValues (const std::array<float, rb::kNumPresetParams>& plain,
+                                                   const rb::dsp::WallArray& start)
+{
     auto set = [this] (const char* id, float plainValue)
     {
         if (auto* param = apvts.getParameter (id))
             param->setValueNotifyingHost (param->convertTo0to1 (plainValue));
     };
-
-    set (rb::ids::material,  (float) p.material);
-    set (rb::ids::yield,     p.yieldDb);
-    set (rb::ids::bias,      p.bias);
-    set (rb::ids::asymmetry, p.asymmetry);
-    set (rb::ids::voidType,  (float) p.voidType);
-    set (rb::ids::heal,      p.healSeconds);
-    set (rb::ids::size,      p.size);
-    set (rb::ids::decay,     p.decaySeconds);
-    set (rb::ids::debris,    p.debris);
-    set (rb::ids::mix,       p.mix);
-    set (rb::ids::reset,     0.0f);
-
-    set (rb::ids::impact,    p.fx.impact);
-    set (rb::ids::rumble,    p.fx.rumble);
-    set (rb::ids::predelay,  p.fx.predelay);
-    set (rb::ids::density,   p.fx.density);
-    set (rb::ids::motion,    p.fx.motion);
-    set (rb::ids::drive,     p.fx.drive);
-    set (rb::ids::lowCut,    p.fx.lowCut);
-    set (rb::ids::highCut,   p.fx.highCut);
-    set (rb::ids::width,     p.fx.width);
-    set (rb::ids::duck,      p.fx.duck);
-    set (rb::ids::freeze,    0.0f);
-    set (rb::ids::detonate,  0.0f);
-
-    // A preset is a fresh room: pristine, or the preset's own starting damage.
-    restoreAllEngines (p.startIntegrity);
+    for (int i = 0; i < rb::kNumPresetParams; ++i)
+        set (rb::kPresetParamIds[i], plain[(size_t) i]);
+    set (rb::ids::reset,    0.0f);
+    set (rb::ids::freeze,   0.0f);
+    set (rb::ids::detonate, 0.0f);
+    restoreAllEngines (start);
 }
 
 //==============================================================================
@@ -394,6 +436,8 @@ void RoomBreakerAudioProcessor::getStateInformation (juce::MemoryBlock& destData
     // recalled exactly as it was left when the session reopens.
     auto state = apvts.copyState();
     state.setProperty (kPresetProperty, currentProgram, nullptr);
+    state.setProperty (kScaleProperty, editorScale.load(), nullptr);
+    presets.writeState (state);
     auto structure = state.getOrCreateChildWithName (kStructureTag, nullptr);
     const auto integrity = engines[(size_t) activeIndex].currentIntegrity();   // atomics: safe from the message thread
     for (int w = 0; w < rb::dsp::kNumWalls; ++w)
@@ -413,7 +457,10 @@ void RoomBreakerAudioProcessor::setStateInformation (const void* data, int sizeI
 
     // Remember which preset the session was based on (for display), without re-applying it.
     currentProgram = juce::jlimit (0, getNumPrograms() - 1, (int) tree.getProperty (kPresetProperty, 0));
-    tree.removeProperty (kPresetProperty, nullptr);
+    editorScale.store (juce::jlimit (0.75f, 2.0f, (float) tree.getProperty (kScaleProperty, 1.0f)));
+    const auto presetInfo = tree.createCopy();
+    for (const auto* id : { "preset", "uiScale", "presetName", "presetUser" })
+        tree.removeProperty (id, nullptr);
     const auto structure = tree.getChildWithName (kStructureTag);
     if (structure.isValid())
     {
@@ -426,6 +473,7 @@ void RoomBreakerAudioProcessor::setStateInformation (const void* data, int sizeI
 
     // Older (v1) sessions have no v2 parameters: replaceState leaves those at their defaults.
     apvts.replaceState (tree);
+    presets.readState (presetInfo, currentProgram);
 }
 
 //==============================================================================

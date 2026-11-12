@@ -11,7 +11,9 @@
 //   dampHz     in-loop low-pass (distance / darkness)
 //   hpHz       output high-pass (thin it out, block DC from grit)
 //   diffusion  1 = full Householder wash, → 0 = lines decouple into discrete
-//              echoes / flutter (A = I − d·(2/N)·11ᵀ, eigenvalues 1 and 1 − 2d)
+//              echoes / flutter (A = I − d·(2/N)·11ᵀ, eigenvalues 1 and 1 − 2d).
+//              It also sets the gain of the allpass inside each loop, which smears
+//              every pass: smooth voids stay smooth, echo voids keep their echoes.
 //   modDepthMs, modRateHz   slow per-line delay wobble (water, heat haze)
 //   drive      0 = clean; > 0 asymmetric tanh grit on the tank output
 //   returnGain level of the exterior in the wet mix
@@ -38,7 +40,7 @@ struct VoidProfile
 inline constexpr VoidProfile kVoidProfiles[] =
 {
     { "Free Field Loss",          false, { 113.7f, 151.3f, 197.1f, 241.9f }, 45.0f, 1400.0f, 20.0f, 1.0f,  0.0f, 0.0f,  0.0f, 1.0f },
-    { "Infinite Secondary Tail",  true,  { 113.7f, 151.3f, 197.1f, 241.9f }, 45.0f, 1400.0f, 20.0f, 1.0f,  0.0f, 0.0f,  0.0f, 1.0f },
+    { "Infinite Secondary Tail",  true,  { 113.7f, 151.3f, 197.1f, 241.9f }, 45.0f, 1400.0f, 20.0f, 1.0f,  1.0f, 0.09f, 0.0f, 1.0f },  // slow drift: a 45 s tail on fixed lines rings
 
     // Dark cinematic set
     { "Industrial Tunnel",        true,  {  41.3f,  47.9f,  53.1f,  61.7f },  7.0f, 3800.0f, 60.0f, 0.35f, 0.3f, 0.15f, 0.0f, 0.8f },  // metallic flutter

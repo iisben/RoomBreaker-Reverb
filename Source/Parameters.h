@@ -39,6 +39,9 @@ namespace ids
     inline constexpr const char* limiter      = "limiter";
     inline constexpr const char* oversampling = "oversampling";
     inline constexpr const char* stressSource = "stresssrc";
+
+    // v3
+    inline constexpr const char* bypass       = "bypass";
 }
 
 /** Oversampling choices: index → factor. */
@@ -66,6 +69,7 @@ public:
     float inputGainDb() const noexcept { return inputGain->load (std::memory_order_relaxed); }
     float outputGainDb() const noexcept { return outputGain->load (std::memory_order_relaxed); }
     float mixAmount() const noexcept { return mix->load (std::memory_order_relaxed); }
+    bool bypassed() const noexcept { return bypass->load (std::memory_order_relaxed) > 0.5f; }
 
 private:
     std::atomic<float>* material  = nullptr;
@@ -83,6 +87,6 @@ private:
                       * motion = nullptr, * freeze = nullptr, * detonate = nullptr, * drive = nullptr,
                       * lowCut = nullptr, * highCut = nullptr, * width = nullptr, * duck = nullptr,
                       * inputGain = nullptr, * outputGain = nullptr, * limiter = nullptr,
-                      * oversampling = nullptr, * stressSource = nullptr;
+                      * oversampling = nullptr, * stressSource = nullptr, * bypass = nullptr;
 };
 } // namespace rb

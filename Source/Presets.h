@@ -4,8 +4,10 @@
 // Loading a preset sets every parameter and rebuilds the room: pristine, or the
 // preset's own starting damage (for presets that begin as ruins).
 //==============================================================================
+#include <array>
 #include <vector>
 #include "DSP/WallState.h"
+#include "Parameters.h"
 
 namespace rb
 {
@@ -45,7 +47,24 @@ struct FactoryPreset
     PresetFx fx {};
     bool hasStartState = false;
     dsp::WallArray startIntegrity { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f }; // N, S, E, W, Ceiling, Floor
+    const char* tags = "";   // comma separated, from presetTagVocabulary()
 };
 
 const std::vector<FactoryPreset>& getFactoryPresets();
+
+/** The sound parameters a preset sets, in a fixed order. Global settings (gains, oversampling,
+    limiter, stress source, bypass) and the momentary buttons are never part of a preset. */
+inline constexpr const char* kPresetParamIds[] =
+{
+    ids::material, ids::yield, ids::bias, ids::asymmetry, ids::voidType, ids::heal, ids::size, ids::decay,
+    ids::debris, ids::mix, ids::impact, ids::rumble, ids::predelay, ids::density, ids::motion, ids::drive,
+    ids::lowCut, ids::highCut, ids::width, ids::duck
+};
+inline constexpr int kNumPresetParams = (int) (sizeof (kPresetParamIds) / sizeof (kPresetParamIds[0]));
+
+/** Plain (not normalised) value of each kPresetParamIds entry for a factory preset. */
+std::array<float, kNumPresetParams> plainValues (const FactoryPreset&);
+
+/** Every tag a preset can carry, in the order the preset browser lists them. */
+const juce::StringArray& presetTagVocabulary();
 } // namespace rb

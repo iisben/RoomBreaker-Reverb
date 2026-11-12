@@ -46,6 +46,16 @@ public:
     void mouseExit (const juce::MouseEvent&) override;
 
     int hoveredWall() const noexcept { return hover; }
+
+    // For what is drawn around and over the plate (leader lines, the Size dimension, the north point).
+    /** Where a surface is on screen, in this component's coordinates: the point a leader line lands on. */
+    juce::Point<float> wallAnchor (int wall) const noexcept;
+    /** False when that wall is on the far side of the house (its leader is drawn dashed, as hidden work is). */
+    bool wallFacesViewer (int wall) const noexcept;
+    /** Left and right screen extent of the lawn at the current view angle. */
+    juce::Range<float> plotSpan() const noexcept;
+    /** Unit vector on screen that points north. */
+    juce::Point<float> northOnScreen() const noexcept;
     void setViewAngle (float radians) noexcept { yaw = radians; returning = false; yawVelocity = 0.0f; repaint(); }
 
     struct V3 { float x = 0.0f, y = 0.0f, z = 0.0f; };
