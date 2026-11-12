@@ -289,7 +289,7 @@ int main (int argc, char** argv)
         const int count = plugin->getNumPrograms();
         juce::StringArray names;
         for (int i = 0; i < count; ++i) names.addIfNotAlreadyThere (plugin->getProgramName (i));
-        check (count >= 28, juce::String (count) + " presets");
+        check (count == 48, juce::String (count) + " presets");
         check (names.size() == count && ! names.contains ({}), "preset names unique and non-empty");
 
         const auto presetDir = outDir.getChildFile ("presets");
@@ -562,6 +562,263 @@ int main (int argc, char** argv)
         check (inputOnly > 0.99f && keyed < 0.9f, "Sidechain source breaks the room from the key, Input source ignores it");
     }
 
+    //--------------------------------------------------------------------------
+    // Each Signature preset is built around one behaviour; its description promises it.
+    // These scenes play the material the preset is for and check the structure does that.
+    std::printf ("\n-- Signature presets do what they say --\n");
+    {
+        constexpr double twoPi = juce::MathConstants<double>::twoPi;
+        juce::MidiBuffer midi;
+        juce::Random noise (77);
+        auto nz = [&] { return (float) (noise.nextDouble() * 2.0 - 1.0); };
+        auto db = [] (float d) { return std::pow (10.0f, d / 20.0f); };
+
+        using Gen = std::function<void (double t, float& l, float& r, float& kl, float& kr)>;
+        struct Rig
+        {
+            std::unique_ptr<juce::AudioProcessor> p;
+            double t = 0.0;
+            float lowest = 1.0f;   // lowest integrity seen during the last feed (every 50 ms)
+            std::function<void (const juce::AudioBuffer<float>& in, const juce::AudioBuffer<float>& out)> tap;
+        };
+        auto open = [&] (const char* preset)
+        {
+            Rig rig;
+            rig.p.reset (createPluginFilter());
+            auto layout = rig.p->getBusesLayout();
+            layout.inputBuses.getReference (1) = juce::AudioChannelSet::stereo();
+            rig.p->setBusesLayout (layout);
+            rig.p->setRateAndBufferSizeDetails (48000.0, 480);
+            rig.p->prepareToPlay (48000.0, 480);
+            rig.p->setCurrentProgram (findProgram (*rig.p, preset));
+            return rig;
+        };
+        auto feed = [&] (Rig& rig, double seconds, const Gen& gen)
+        {
+            const int chans = rig.p->getTotalNumInputChannels();
+            juce::AudioBuffer<float> buf (std::max (chans, 2), 480), in;
+            rig.lowest = 1.0f;
+            for (int b = 0; b < (int) (seconds * 100.0); ++b)
+            {
+                buf.clear();
+                for (int i = 0; i < 480; ++i)
+                {
+                    float l = 0, r = 0, kl = 0, kr = 0;
+                    gen (rig.t + (double) i / 48000.0, l, r, kl, kr);
+                    buf.setSample (0, i, l); buf.setSample (1, i, r);
+                    if (chans >= 4) { buf.setSample (2, i, kl); buf.setSample (3, i, kr); }
+                }
+                if (rig.tap) in.makeCopyOf (buf);
+                rig.p->processBlock (buf, midi);
+                if (rig.tap) rig.tap (in, buf);
+                rig.t += 0.01;
+                if (b % 5 == 4) rig.lowest = std::min (rig.lowest, minOf (savedIntegrity (*rig.p)));
+            }
+            return savedIntegrity (*rig.p);
+        };
+        auto silence = [] (double, float&, float&, float&, float&) {};
+        // A hit every `period` s with a peak of `level` dBFS (kick body + noise snap).
+        auto hits = [&] (float level, double period) -> Gen
+        {
+            return [&, level, period] (double t, float& l, float& r, float&, float&)
+            {
+                const double tk = std::fmod (t, period);
+                const float x = db (level) * (float) (0.6 * std::sin (twoPi * 55.0 * tk) * std::exp (-10.0 * tk))
+                              + db (level) * 0.4f * nz() * (float) std::exp (-40.0 * tk);
+                l += x; r += x;
+            };
+        };
+        // A sustained chord with a soft 300 ms attack, peaking near `level` dBFS.
+        auto pad = [&] (float level, double from) -> Gen
+        {
+            return [&, level, from] (double t, float& l, float& r, float&, float&)
+            {
+                const double fade = std::min (1.0, (t - from) / 0.3);
+                const float x = db (level) * (float) (fade * (std::sin (twoPi * 220.0 * t) + std::sin (twoPi * 277.2 * t) + std::sin (twoPi * 329.6 * t)) / 3.0);
+                l += x; r += x;
+            };
+        };
+        auto mix = [] (Gen a, Gen b) -> Gen
+        {
+            return [a, b] (double t, float& l, float& r, float& kl, float& kr) { a (t, l, r, kl, kr); b (t, l, r, kl, kr); };
+        };
+        auto sub = [&] (float level, double from) -> Gen
+        {
+            return [&, level, from] (double t, float& l, float& r, float&, float&)
+            {
+                const float x = db (level) * (float) (std::min (1.0, (t - from) / 0.2) * std::sin (twoPi * 45.0 * t));
+                l += x; r += x;
+            };
+        };
+        const auto n = [] (int w, const std::array<float, 6>& I) { return I[(size_t) w]; };
+
+        {   // Consonant Shards: sung vowels at -9 dBFS leave the glass alone; hard consonants break it.
+            auto rig = open ("Consonant Shards");
+            const auto sung = feed (rig, 4.0, pad (-9.0f, rig.t));
+            const double t0 = rig.t;
+            const auto spat = feed (rig, 2.0, [&, t0] (double t, float& l, float& r, float&, float&)
+            {
+                const double tk = std::fmod (t - t0, 0.5);
+                const float x = 0.8f * nz() * (float) std::exp (-150.0 * tk);   // a 't' at about -2 dBFS
+                l += x; r += x;
+            });
+            std::printf ("    Consonant Shards: after vowels %.3f, after consonants %.3f\n", minOf (sung), minOf (spat));
+            check (minOf (sung) > 0.999f && minOf (spat) < 0.97f, "Consonant Shards: vowels don't break it, consonants do");
+        }
+        {   // Kick-Torn Cathedral: the pad alone never breaks it; with Break by = Key the kick tears it, and it seals again.
+            auto rig = open ("Kick-Torn Cathedral");
+            const auto padOnly = feed (rig, 3.0, pad (-8.0f, rig.t));
+            setParam (*rig.p, "stresssrc", 1.0f);
+            const auto torn = feed (rig, 3.0, mix (pad (-8.0f, -1.0), [&] (double t, float&, float&, float& kl, float& kr)
+            {
+                const double tk = std::fmod (t, 0.5);
+                kl = kr = 0.8f * (float) (std::sin (twoPi * 50.0 * tk) * std::exp (-8.0 * tk));
+            }));
+            const auto sealed = feed (rig, 4.0, pad (-8.0f, -1.0));
+            std::printf ("    Kick-Torn Cathedral: pad %.3f, keyed kicks %.3f, 4 s later %.3f\n", minOf (padOnly), minOf (torn), meanOf (sealed));
+            check (minOf (padOnly) > 0.999f && minOf (torn) < 0.95f && meanOf (sealed) > 0.97f,
+                   "Kick-Torn Cathedral: pad alone leaves it whole, keyed kicks tear it, it seals again");
+        }
+        {   // Chorus Memory keeps the damage far longer than Default Bunker.
+            auto recovered = [&] (const char* preset)
+            {
+                auto rig = open (preset);
+                const auto hit = feed (rig, 4.0, hits (-1.0f, 0.25));
+                const auto later = feed (rig, 15.0, pad (-30.0f, rig.t));
+                return std::make_pair (meanOf (hit), meanOf (later));
+            };
+            const auto memory = recovered ("Chorus Memory");
+            const auto bunker = recovered ("Default Bunker");
+            auto share = [] (std::pair<float, float> r) { return (r.second - r.first) / (1.0f - r.first); };   // of the damage, how much healed
+            std::printf ("    Chorus Memory: %.2f -> %.2f after 15 s (%.0f %% healed); Default Bunker: %.2f -> %.2f (%.0f %%)\n",
+                         memory.first, memory.second, 100.0f * share (memory), bunker.first, bunker.second, 100.0f * share (bunker));
+            check (memory.first < 0.9f && share (memory) < 0.5f * share (bunker),
+                   "Chorus Memory: wrecked by the loud part, heals less than half as much as Default Bunker in 15 s");
+        }
+        {   // Growing Canyon: every loud passage opens it further; nothing heals.
+            auto rig = open ("Growing Canyon");
+            const auto a = feed (rig, 3.0, hits (-2.0f, 0.3));
+            const auto rest = feed (rig, 3.0, silence);
+            const auto b = feed (rig, 3.0, hits (-2.0f, 0.3));
+            std::printf ("    Growing Canyon: %.3f -> rest %.3f -> %.3f\n", meanOf (a), meanOf (rest), meanOf (b));
+            check (meanOf (a) < 0.93f && std::abs (meanOf (rest) - meanOf (a)) < 1.0e-5f && meanOf (b) < meanOf (a) - 0.02f,
+                   "Growing Canyon: erodes with every loud passage and never heals");
+        }
+        {   // Riser Tension: a swell to -8 dBFS never breaks it; the drop's first hit does.
+            auto rig = open ("Riser Tension");
+            const double t0 = rig.t;
+            const auto swell = feed (rig, 6.0, [&, t0] (double t, float& l, float& r, float&, float&)
+            {
+                const float x = db (-30.0f + 22.0f * (float) ((t - t0) / 6.0)) * nz();
+                l += x; r += x;
+            });
+            const auto drop = feed (rig, 1.0, hits (0.0f, 2.0));
+            std::printf ("    Riser Tension: after the swell %.3f, after the drop %.3f\n", minOf (swell), minOf (drop));
+            check (minOf (swell) > 0.999f && minOf (drop) < 0.97f, "Riser Tension: the swell never breaks it, the drop does");
+        }
+        {   // Controlled Demolition: full-scale drums can't touch it; Detonate does, for good.
+            auto rig = open ("Controlled Demolition");
+            const auto drums = feed (rig, 4.0, hits (0.0f, 0.25));
+            setParam (*rig.p, "detonate", 1.0f);
+            const auto blown = feed (rig, 2.0, silence);
+            setParam (*rig.p, "detonate", 0.0f);
+            const auto after = feed (rig, 3.0, hits (0.0f, 0.25));
+            std::printf ("    Controlled Demolition: drums %.3f, detonated %.3f, drums again %.3f\n", minOf (drums), meanOf (blown), meanOf (after));
+            check (minOf (drums) > 0.999f && meanOf (blown) < 0.9f && std::abs (meanOf (after) - meanOf (blown)) < 1.0e-5f,
+                   "Controlled Demolition: only Detonate breaks it, and it stays broken");
+        }
+        {   // Rising From Rubble: starts as rubble and rebuilds under a quiet intro.
+            auto rig = open ("Rising From Rubble");
+            const auto start = feed (rig, 0.1, silence);
+            const auto built = feed (rig, 30.0, pad (-24.0f, rig.t));
+            std::printf ("    Rising From Rubble: %.2f -> %.2f after a 30 s quiet intro\n", meanOf (start), meanOf (built));
+            check (meanOf (start) < 0.06f && meanOf (built) > 0.6f, "Rising From Rubble: rebuilds itself while the music is quiet");
+        }
+        {   // Booth to Stadium: verse-level hits stay in the booth, chorus hits breach it.
+            auto rig = open ("Booth to Stadium");
+            const auto verse = feed (rig, 3.0, hits (-10.0f, 0.25));
+            const auto chorus = feed (rig, 3.0, hits (-1.0f, 0.25));
+            std::printf ("    Booth to Stadium: verse %.3f, chorus %.3f\n", minOf (verse), minOf (chorus));
+            check (minOf (verse) > 0.999f && minOf (chorus) < 0.9f, "Booth to Stadium: verse hits hold, chorus hits breach");
+        }
+        {   // Glacier Groan: drums can't strain it; a held low note does.
+            auto rig = open ("Glacier Groan");
+            const auto drums = feed (rig, 3.0, hits (-6.0f, 0.25));
+            const auto held = feed (rig, 6.0, sub (-6.0f, rig.t));
+            std::printf ("    Glacier Groan: drums %.3f, held 45 Hz %.3f\n", minOf (drums), minOf (held));
+            check (minOf (drums) > 0.999f && minOf (held) < 0.9f, "Glacier Groan: only long low notes strain it");
+        }
+        {   // Tile Snare Exciter: ghost notes don't crack it, accents do, and it is whole again within a second.
+            auto rig = open ("Tile Snare Exciter");
+            feed (rig, 2.0, hits (-22.0f, 0.2));
+            const float ghosts = rig.lowest;
+            feed (rig, 2.0, hits (-3.0f, 0.5));
+            const float accents = rig.lowest;
+            const auto healed = feed (rig, 1.0, silence);
+            std::printf ("    Tile Snare Exciter: lowest under ghosts %.3f, under accents %.3f, 1 s later %.3f\n", ghosts, accents, minOf (healed));
+            check (ghosts > 0.999f && accents < 0.97f && minOf (healed) > 0.99f,
+                   "Tile Snare Exciter: accents crack it, ghost notes don't, and it heals at once");
+        }
+        {   // Breath Abyss: ducked all the way, so the wet signal is all but gone under the words and
+            // rises in the gaps. Compare with the same preset with no ducking.
+            auto measure = [&] (float duck)
+            {
+                auto rig = open ("Breath Abyss");
+                setParam (*rig.p, "duck", duck);
+                const float dry = std::cos (0.4f * juce::MathConstants<float>::halfPi);   // the preset's dry gain (Mix 40 %)
+                double word = 0, gap = 0; int nw = 0, ng = 0;
+                bool inWord = false, inGap = false;
+                rig.tap = [&] (const juce::AudioBuffer<float>& in, const juce::AudioBuffer<float>& out)
+                {
+                    for (int i = 0; i < in.getNumSamples(); ++i)
+                    {
+                        const float res = out.getSample (0, i) - dry * in.getSample (0, i);   // everything that isn't the dry voice
+                        if (inWord) { word += res * res; ++nw; }
+                        if (inGap)  { gap += res * res; ++ng; }
+                    }
+                };
+                for (int k = 0; k < 3; ++k)
+                {
+                    inWord = false; feed (rig, 0.4, pad (-6.0f, rig.t));                 // the word's attack
+                    inWord = true;  feed (rig, 0.8, pad (-6.0f, rig.t - 1.0));
+                    inWord = false; feed (rig, 0.6, silence);                            // the duck lets go...
+                    inGap = true;   feed (rig, 1.0, silence);                            // ...and the abyss is back
+                    inGap = false;
+                }
+                return std::make_pair (std::sqrt (word / std::max (nw, 1)), std::sqrt (gap / std::max (ng, 1)));
+            };
+            const auto ducked = measure (1.0f), unducked = measure (0.0f);
+            std::printf ("    Breath Abyss: wet under the words %.4f (unducked %.4f), in the gaps %.4f (unducked %.4f)\n",
+                         ducked.first, unducked.first, ducked.second, unducked.second);
+            check (ducked.first < 0.25f * unducked.first && ducked.second > 2.0f * ducked.first && ducked.second > 0.4f * unducked.second,
+                   "Breath Abyss: the reverb all but vanishes under the words and rises in the gaps");
+        }
+        {   // Sinkhole: the floor is gone for good; a held sub grinds the other walls down.
+            auto rig = open ("Sinkhole");
+            const auto held = feed (rig, 6.0, sub (-3.0f, rig.t));
+            std::printf ("    Sinkhole: floor %.3f, walls min %.3f after a held sub\n", n (5, held), std::min ({ n (0, held), n (1, held), n (2, held), n (3, held) }));
+            check (n (5, held) < 0.05f && std::min ({ n (0, held), n (1, held), n (2, held), n (3, held) }) < 0.9f,
+                   "Sinkhole: no floor, and a held sub grinds the walls");
+        }
+        {   // Hearth Crackle: every note splinters it, and it re-sets between phrases.
+            auto rig = open ("Hearth Crackle");
+            const auto playing = feed (rig, 2.0, hits (-10.0f, 0.3));
+            const auto pause = feed (rig, 1.5, silence);
+            std::printf ("    Hearth Crackle: playing %.3f, after a pause %.3f\n", minOf (playing), minOf (pause));
+            check (minOf (playing) < 0.97f && minOf (pause) > 0.98f, "Hearth Crackle: notes splinter it, a pause re-sets it");
+        }
+        {   // The hit-driven ones: ordinary hits at -6 dBFS set them off.
+            for (const char* preset : { "Thunder Sheet", "Singing Lake Ice", "Porcelain Dollhouse", "Garage Amp Shed", "High Vault Aftermath",
+                                        "Breakage Foley Printer", "Distant Front Line" })
+            {
+                auto rig = open (preset);
+                const auto I = feed (rig, 2.0, hits (-6.0f, 0.4));
+                std::printf ("    %s: %.3f after hits at -6 dBFS\n", preset, minOf (I));
+                check (minOf (I) < 0.97f, juce::String (preset) + ": hits at -6 dBFS break it");
+            }
+        }
+    }
+
 
     //--------------------------------------------------------------------------
     std::printf ("\n-- Bypass and meters --\n");
@@ -616,7 +873,7 @@ int main (int argc, char** argv)
         auto& lib = rbp.presets;
         userPresets.deleteRecursively();
         lib.setUserFolder (userPresets);   // never the user's real folder
-        check (lib.size() == 28, "28 factory presets listed");
+        check (lib.size() == 48, "48 factory presets listed");
 
         auto names = [&] (const std::vector<int>& idx)
         {
@@ -627,9 +884,9 @@ int main (int argc, char** argv)
         const auto glass = names (lib.search ("glass", {}, {}));
         check (glass.size() >= 1 && glass[0] == "Glass Rain Collapse", "search finds by name, name matches first");
         const auto perm = names (lib.search ({}, { "Permadeath" }, {}));
-        check (perm.size() == 3, "tag filter: 3 presets tagged Permadeath (" + perm.joinIntoString (", ") + ")");
+        check (perm.size() == 7, "tag filter: 7 presets tagged Permadeath (" + perm.joinIntoString (", ") + ")");
         check (lib.search ("dark tail", {}, {}).size() >= 2, "every word must match (name, tags, category or description)");
-        check (lib.search ({}, { "Drums", "Metallic" }, {}).size() == 2, "tags combine (Drums AND Metallic)");
+        check (lib.search ({}, { "Drums", "Metallic" }, {}).size() == 3, "tags combine (Drums AND Metallic)");
         check (lib.search ({}, {}, "Ambient").size() == 3, "category narrows to Ambient (3)");
         bool everyTagKnown = true;
         for (int i = 0; i < lib.size(); ++i)
@@ -647,7 +904,7 @@ int main (int argc, char** argv)
 
         check (lib.saveUser ("Smoke Test Room", {}, { "Dark", "Long tail" }), "user preset saved");
         check (userPresets.getChildFile ("Smoke Test Room.rbpreset").existsAsFile(), "file written as Smoke Test Room.rbpreset");
-        check (lib.size() == 29 && lib.currentName() == "Smoke Test Room" && ! lib.isModified(), "saved preset is listed and current");
+        check (lib.size() == 49 && lib.currentName() == "Smoke Test Room" && ! lib.isModified(), "saved preset is listed and current");
         check (lib.search ({}, {}, rb::PresetLibrary::kUserCategory).size() == 1
                && lib.categories().contains (rb::PresetLibrary::kUserCategory), "user presets have their own category");
 
@@ -964,7 +1221,7 @@ int main (int argc, char** argv)
                 browser.open();
                 check (browser.isVisible(), "browser opens");
                 browser.setSearchText ("cathedral");
-                check (browser.getNumResults() == 2, "search \"cathedral\": 2 results");
+                check (browser.getNumResults() == 3, "search \"cathedral\": 3 results");
                 browser.setSearchText ({});
                 browser.setTagSelected ("Dark", true);
                 const int dark = browser.getNumResults();

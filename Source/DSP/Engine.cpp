@@ -263,6 +263,8 @@ void Engine::controlTick() noexcept
         flash = std::max (flash, events[e].magnitude);
     }
     debris.updateChatter (dt, n);
+    impact.setRoomSize (sizeSmoothed);
+    impact.setStress (frozen ? WallArray {} : stress.stressRatio(), smoothedIntegrity);
     impact.update (dt, n, frozen ? 0.0f : meanLoose, stress.inputPeakEnvelope());
 
     // Pre-delay: when the target moves, crossfade from the current tap to the new one.

@@ -40,6 +40,16 @@ public:
     static constexpr float kLfCutoffHz  = 120.0f;
     static constexpr float kFatigueTau  = 1.5f;   // s — LF energy integration window
     static constexpr float kPeakRelease = 0.12f;  // s — peak "SPL" envelope release
+    // An impact must lift the short-term energy, not just one peak: the block RMS, or the RMS of
+    // the signal's slope (its first difference), has to jump this far over its recent level (held,
+    // released over kOnsetRelease). Noise (a riser, a crash ringing out, a distorted pad) throws
+    // random peaks, but neither RMS moves, so it never "hits". The slope ignores sustained bass, so
+    // a kick still lands on top of a held sub; the plain RMS catches a kick right after a noise riser.
+    // A hit's peak can arrive a few ms after its slope jumps (a kick's sine body peaks after its
+    // first cycle starts), so an onset stays open for kOnsetHold.
+    static constexpr float kOnsetRatio   = 1.3f;
+    static constexpr float kOnsetRelease = 0.1f;  // s
+    static constexpr float kOnsetHold    = 0.02f; // s
 
     void prepare (double sampleRate);
     void reset();             // analysis state + structure
@@ -83,9 +93,11 @@ private:
     WallArray blockPeak {}, peakEnv {}, prevPeakEnv {};
     int   peakIndex = 0, lastBlockLength = 1;
     float inputPeak_ = 0.0f, inputPeakEnv = 0.0f;
+    float rmsEnv = 0.0f, slopeEnv = 0.0f, prevL = 0.0f, prevR = 0.0f;
+    float onsetOpen = 0.0f;  // s left in which a peak counts as an impact (the slope energy jumped)
 
     // open analysis window
-    float accPkL = 0.0f, accPkR = 0.0f, accPkM = 0.0f, accPkS = 0.0f, accPkAny = 0.0f, accLfEnergy = 0.0f;
+    float accPkL = 0.0f, accPkR = 0.0f, accPkM = 0.0f, accPkS = 0.0f, accPkAny = 0.0f, accLfEnergy = 0.0f, accEnergy = 0.0f, accSlope = 0.0f;
     int   accIndex = 0, accCount = 0;
 
     WallArray integrity_ {}, stressRatio_ {}, cooldown {}, creakAccumulator {};

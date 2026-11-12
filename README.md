@@ -70,7 +70,10 @@ Four of the eleven materials, each shown new, part-broken and wrecked:
 - 1x / 2x / 4x oversampling, which switches without clicks.
 - Every control can be automated without clicks.
 - A safety limiter and ducking.
-- 28 factory presets.
+- Breaks that sound like real failure: warning crackle under load, cracks that propagate, ringing
+  crack whistles in ice and steel, pieces that fall and bounce in time with the room's height, and
+  aftershocks.
+- 48 factory presets, including 20 Signature presets built around what only a breaking room can do.
 - Notes on the sheet that explain whatever the mouse is over.
 
 ## Download

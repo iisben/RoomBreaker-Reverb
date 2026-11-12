@@ -1,20 +1,37 @@
 #pragma once
 //==============================================================================
-// ImpactGenerator — the physical "hit" of a structure failing.
+// ImpactGenerator — the physical sound of a structure failing.
 //
-// The modal debris engine gives each fracture its ringing pitch. This layer adds
-// the weight a real collapse has, voiced per material (MaterialVoicing):
+// The modal debris engine gives each fracture its ringing pitch. This layer is
+// everything else a real failure makes, voiced per material (MaterialVoicing) and
+// scaled by how big the break is, so a hairline crack and a collapse are different
+// sounds, not the same sound at two volumes:
 //
-//   Boom    sub sine whose pitch falls an octave (f0 → f0/2) with an exponential
-//           amplitude decay. Mono (centred) so the low end stays solid.
-//   Crack   short band-passed noise burst at the material's crack frequency,
-//           panned to the wall that broke.
-//   Rubble  Poisson-scheduled noise grains (falling chunks) plus a low rumble bed,
-//           both driven by "rubble energy": every fracture adds to it and it
-//           settles over ~2.5 s. Loose slabs under load keep it trickling.
+//   Warning   before anything breaks, an overloaded wall crackles: sparse micro-
+//             fractures whose rate climbs as the load nears what the wall can take
+//             (acoustic emission). The room tells you it is about to go.
+//   Crack     a fracture runs through the material instead of happening at once: a
+//             main snap, then a burst of micro-fractures over the material's crack
+//             time, faint ones far more common than loud ones, travelling across the
+//             stereo field. Big breaks snap lower and run longer; small ones tick.
+//   Whistle   thin plates (ice, steel, glass) are dispersive: the crack arrives as a
+//             falling sweep (the "pew" of lake ice, the thunder of a buckling sheet).
+//   Boom      the body of the hit: a falling sub sine plus a broadband thud. Bigger
+//             collapses go deeper. Mono, so the low end stays solid.
+//   Debris    pieces come loose, fall and land: each one has a size (many small, a few
+//             big), drops from a height set by Size and the wall it came from, lands
+//             after its fall time and bounces by the material's restitution. Glass and
+//             ice burst into tinkling fragments as they land. Landings feed the rubble.
+//   Settling  a big break is followed by aftershocks: smaller cracks whose rate falls
+//             off as 1/t over a few seconds (Omori's law), as the structure re-seats.
+//   Creak     slow, ductile failure: a stick-slip pulse train through the material's
+//             resonance, a pitched creak in steel and wood, a grind in stone.
+//   Rubble    the lingering bed and trickle of grains, driven by "rubble energy".
 //
-// Impact scales boom + crack, Rumble scales rubble. Every voice owns its RNG, so the
-// output does not depend on how the host slices audio.
+// Impact scales the warning, crack, whistle, boom and settling; Rumble scales the
+// falling debris and rubble; creaks take both. Every voice owns its RNG and every
+// scheduled sound is timed from the control grid, so the output does not depend on
+// how the host slices audio.
 //==============================================================================
 #include "DspUtils.h"
 #include "Materials.h"
@@ -25,25 +42,34 @@ namespace rb::dsp
 class ImpactGenerator
 {
 public:
-    static constexpr int kNumBooms  = 4;
-    static constexpr int kNumNoises = 24;   // cracks and rubble grains share one pool
+    static constexpr int kNumBooms     = 4;
+    static constexpr int kNumNoises    = 64;   // cracks, micro-fractures, landings, grains share one pool
+    static constexpr int kNumChirps    = 8;
+    static constexpr int kNumCreaks    = 4;
+    static constexpr int kNumSequences = 6;    // aftershock sequences
+    static constexpr int kQueueSize    = 384;  // landings and bounces still in the air
 
     void prepare (double sampleRate);
     void reset();
 
     void setVoicing (const MaterialVoicing* v) noexcept { voicing = v; }
     void setAmounts (float impact, float rumble) noexcept { impactAmount = clamp01 (impact); rumbleAmount = clamp01 (rumble); }
+    /** Room Size (1 = default): sets how far pieces fall. */
+    void setRoomSize (float s) noexcept { roomSize = std::clamp (s, 0.3f, 2.5f); }
+    /** Control rate: stress / capacity per wall (all zero while frozen) and integrity, for the warning crackle. */
+    void setStress (const WallArray& ratio, const WallArray& integrity) noexcept { stressRatio = ratio; integrityNow = integrity; }
 
-    /** Control rate: one fracture / creak / detonation. */
+    /** Control rate: one fracture / creak / detonation. sampleOffset may lie beyond this tick (a delayed charge). */
     void trigger (const FractureEvent& e) noexcept;
 
-    /** Control rate: rubble scheduler. meanLooseness and activity (input peak env) keep it trickling. */
+    /** Control rate: debris in the air, aftershocks, warning crackle, rubble. Call once per tick, after trigger(). */
     void update (float dtSeconds, int blockLength, float meanLooseness, float activity) noexcept;
 
     /** Renders into outL/outR (overwrites). */
     void process (float* outL, float* outR, int numSamples) noexcept;
 
     float rubbleEnergy() const noexcept { return rubble; }
+    int piecesInTheAir() const noexcept { return numPending; }
 
 private:
     struct Boom
@@ -67,16 +93,64 @@ private:
         Rng   rng { 1u };
     };
 
+    struct Chirp                          // a falling sine sweep (dispersion)
+    {
+        bool  active = false;
+        int   startDelay = 0;
+        float phase = 0.0f, freq = 1000.0f, freqMul = 1.0f, freqMin = 100.0f;
+        float amp = 0.0f, ampDecay = 0.999f, attack = 0.0f, attackInc = 0.01f;
+        float panL = 0.707f, panR = 0.707f;
+    };
+
+    struct Creak                          // stick-slip pulses through a resonance
+    {
+        bool  active = false;
+        int   wall = 0, startDelay = 0, age = 0, hold = 0;
+        float phase = 0.0f, rate = 20.0f, rateInc = 0.0f, rateLo = 5.0f, rateHi = 100.0f;
+        float amp = 0.0f, env = 0.0f, grit = 0.5f, norm = 1.0f;
+        float panL = 0.707f, panR = 0.707f;
+        SvfTpt res;
+        Rng   rng { 1u };
+    };
+
+    struct Pending                        // a piece in the air, or a bounce still to come
+    {
+        int   due = 0;                    // samples from the start of the current tick
+        float hz = 1000.0f, q = 1.0f, amp = 0.0f, decayMs = 5.0f, pan = 0.0f;
+        float thump = 0.0f;               // heavy pieces thud the floor
+        float rubble = 0.0f;              // what the landing adds to the rubble energy
+        float shatter = 0.0f;             // fragments it bursts into
+    };
+
+    struct Sequence                       // aftershocks of one big break
+    {
+        bool  active = false;
+        int   wall = 0;
+        float t = 0.0f, k = 0.0f;
+    };
+
     Noise& allocateNoise() noexcept;
     void startBoom (int wall, float magnitude, float amp, int offset) noexcept;
     void startNoise (float hz, float q, float amp, float decayMs, int delay, float pan) noexcept;
+    void startChirp (float hiHz, float loHz, float ms, float amp, int delay, float pan) noexcept;
+    void startCreak (int wall, float magnitude, int delay) noexcept;
+    void crack (int wall, float magnitude, int offset, float level) noexcept;
+    void dropPieces (int wall, float magnitude, int offset) noexcept;
+    void schedule (const Pending&) noexcept;
+    void land (const Pending&, int offset) noexcept;
 
     float fs = 48000.0f;
     const MaterialVoicing* voicing = nullptr;
-    float impactAmount = 0.5f, rumbleAmount = 0.3f;
+    float impactAmount = 0.5f, rumbleAmount = 0.3f, roomSize = 1.0f;
+    WallArray stressRatio {}, integrityNow { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
     std::array<Boom, kNumBooms> booms;
     std::array<Noise, kNumNoises> noises;
+    std::array<Chirp, kNumChirps> chirps;
+    std::array<Creak, kNumCreaks> creaks;
+    std::array<Sequence, kNumSequences> sequences;
+    std::array<Pending, kQueueSize> pending;
+    int numPending = 0;
 
     float rubble = 0.0f;                 // rubble energy (0..~3)
     float bedAmp = 0.0f, bedAmpInc = 0.0f;

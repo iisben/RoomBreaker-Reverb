@@ -9,7 +9,7 @@ breach under the mechanical stress of the incoming audio, then heal (or don't).
 CMakeLists.txt                 JUCE 8 via FetchContent; RB_CORE_ONLY=ON builds core + tests only
 Source/
   Parameters.{h,cpp}           APVTS layout + wait-free ParameterCache::snapshot()
-  Presets.{h,cpp}              28 factory presets with tags (host programs + the browser)
+  Presets.{h,cpp}              48 factory presets with tags (host programs + the browser)
   PresetLibrary.{h,cpp}        Factory + user presets: search, tags, save, modified state (see 5b)
   PluginProcessor.{h,cpp}      AudioProcessor: buses (+ sidechain), oversampling, gains, limiter, bypass, meters, state
   PluginEditor.{h,cpp}         The console: header, rails, display, controls, footer; scaling (see 5d)
@@ -31,7 +31,8 @@ Resources/fonts/               Barlow Semi Condensed, JetBrains Mono (SIL OFL, l
     EarlyReflectionEngine.*    24-tap shoebox image-source ER with jitter + scatter
     DynamicFDN.{h,cpp}         16-line Hadamard FDN with bleed + morphing loop filters, ExteriorTank
     ModalDebrisGenerator.*     32-voice complex-resonator debris, chatter, contact rattle
-    ImpactGenerator.{h,cpp}    Fracture weight: sub boom, crack transient, rubble grains + rumble bed
+    ImpactGenerator.{h,cpp}    Fracture physics: warning crackle, crack cascade, chirp, boom, falling
+                               pieces + bounces, aftershocks, creak, rubble grains + rumble bed
     Telemetry.h                Triple buffer + atomics, audio → UI
     Engine.{h,cpp}             Owns everything; the processBlock body
 Tests/OfflineRender.cpp        Core scenario harness: invariants, telemetry threading, WAV renders, real-time factor
@@ -272,10 +273,28 @@ The modal debris gives a fracture its pitch; this layer gives it weight. Voiced 
   and a touch of 2nd harmonic. It is mono, so the low end stays solid. Walls failing in the same
   40 ms are one collapse: they merge into one boom (energy sum, capped) instead of stacking coherent
   sines. That merge took the hottest preset peaks from +3.5 dB to +2.3 dB.
-* **Crack**: band-passed noise burst at the material's crack frequency, panned to the wall, plus a
-  smaller splinter on big hits.
+* **Warning crackle**: real structures click before they fail (acoustic emission). Once a wall's
+  stress ratio passes 0.55, faint ticks start, getting denser and louder up to the breaking point
+  (1.05), so a slow swell is heard straining the room before anything gives.
+* **Crack**: not one burst but a propagating crack. A fracture fires a cascade of micro-cracks over
+  the material's `spreadMs` (3 ms glass … 60 ms timber), sizes drawn from a power law (many small,
+  few big), each a band-passed noise click panned to the wall. Bigger breaks go deeper and longer.
+* **Dispersion chirp**: in ice, steel and glass the crack's sound runs through the sheet and arrives
+  as a falling whistle (an exponential sweep, `chirpHiHz → chirpLoHz` over `chirpMs`), the "pew" of
+  lake ice and the boom-roll of a buckling steel panel.
+* **Falling pieces**: a break frees pieces that land after the time it takes them to fall,
+  `sqrt(2h/g)` with h = 2.8 m × Size (so a big room's aftermath arrives later), then bounce: each
+  bounce comes `2·e·v/g` after the last, with e the material's `restitution`. Brittle materials
+  shatter into a spray of fragments on landing.
+* **Aftershocks**: after a big break the structure keeps settling. Small follow-up cracks fire at an
+  Omori-law rate, `k/(t+0.15)^1.15`, for up to 5 s.
+* **Creak**: ductile damage (plastic yield, fatigue) is a stick-slip pulse train through a resonance
+  (`creakHz`, `creakQ`), at `creakRate` pulses per second, with grit, instead of a noise scrape.
 * **Rubble**: Poisson noise grains plus a low rumble bed, both driven by a rubble energy that every
-  fracture adds to (it settles over 2.5 s). Loose walls under load keep it trickling.
+  fracture and every landing adds to (it settles over 2.5 s). Loose walls under load keep it trickling.
+
+Landings, bounces and aftershocks wait in a queue of up to 384 events, timed on the control grid,
+so the result is the same at any host block size.
 * **Shock** (in `Engine`): a fracture envelope (τ 0.35 s) that stretches every FDN line by up to
   1.6 %, so the room's pitch flexes on big hits.
 
@@ -284,8 +303,21 @@ as the debris voices: noise generators, filters and envelopes in vector steps. T
 polynomial sine (error below −120 dB) instead of two library calls per sample. A busy collapse
 costs 47 ns per sample (it was 136).
 
-Impact scales boom, crack and shock; Rumble scales the rubble. DETONATE (`StressTracker::detonate`)
-removes a material-scaled chunk from every wall and emits a full-magnitude event per wall.
+Impact scales boom, crack, chirp, warning and shock; Rumble scales the rubble and the falling
+pieces. DETONATE (`StressTracker::detonate`) removes a material-scaled chunk from every wall and
+emits a full-magnitude event per wall. Like a real demolition the charges fire in a random order,
+30–110 ms apart, so it is heard as a rolling chain of bangs running into the collapse.
+
+The modal debris follows the same physics: a bigger break frees bigger pieces, which ring lower
+(×1.25 down to ×0.85), are struck harder (a shorter, brighter excitation) and are reached by the
+crack over up to 21 ms instead of all at once. Chatter fragments follow a power law: mostly faint
+ticks, a few loud pieces.
+
+**Onset gate** (`StressTracker`). A brittle fracture also needs an onset: the block's RMS, or the
+RMS of its first difference (slope, which tracks the attack of a kick over a held sub), must jump
+1.3× above its own held envelope (0.1 s release), and the gate stays open 20 ms so a kick whose
+peak lands after its attack still counts. Noise risers and crash tails, whose peaks wander up
+without any real onset, no longer break walls by chance.
 
 ### 4.7 Tank quality controls (`DynamicFDN::TankControl`)
 
@@ -362,7 +394,8 @@ relaxed loads.
 
 ## 5b. Factory presets
 
-There are 28 presets, defined in `Source/Presets.cpp`. They appear in the editor's preset browser
+There are 48 presets, defined in `Source/Presets.cpp`: 28 for everyday jobs and 20 in the
+Signature category, each built around one behaviour only a breaking room can do. They appear in the editor's preset browser
 and in the host's own preset menu (AU factory presets / VST3 programs). Loading a preset sets every
 sound parameter (`kPresetParamIds`) and gives you a fresh room: pristine, or the preset's own
 starting damage for the presets that start as ruins. The session remembers which preset it was based on.
@@ -410,6 +443,26 @@ source or bypass, so browsing never jumps the level or the CPU load.
 | 26 | Dark Cinematic · Burning Rafters | textures, bass, FX | Charred timber creaks and splinters under load, with a distorted fire-lit city beyond |
 | 27 | Dark Cinematic · Sub Collapse Sequence | builds, drops | Sustained sub slowly crushes a monolith into the abyss over a build (never heals); Rebuild on the drop |
 | 28 | Dark Cinematic · Dread Engine Room | gritty leads, synth stabs | Starts with loose steel panels; everything you play sets the structure buzzing and rattling |
+| 29 | Signature · Consonant Shards | vocals | Glass only plosives can break: sung notes stay smooth, consonants throw shards into the tail |
+| 30 | Signature · Kick-Torn Cathedral | pads, with the kick on the sidechain (Break by = Key) | Every kick tears the nave open into the outer hall; the stone seals between kicks |
+| 31 | Signature · Chorus Memory | full songs | Heals over 75 s: the chorus wrecks it, the next verse plays in the wreck, then it rebuilds |
+| 32 | Signature · Growing Canyon | builds, drums | Starts cracked onto a canyon; each big hit opens more for good, multiplying the slapbacks |
+| 33 | Signature · Garage Amp Shed | guitars, bass | Small driven steel shed: soft playing stays clean, digging in buckles and rattles the panels |
+| 34 | Signature · Porcelain Dollhouse | music box, keys, plucks | Toy porcelain room; accents chip it for good and the cue sinks into the abyss |
+| 35 | Signature · High Vault Aftermath | hits, toms | Double-height vault: the stone a hit shakes loose lands up to a second later, on its own beat |
+| 36 | Signature · Tile Snare Exciter | snares, claps | Accents crack tiles and ghost notes don't; heals in 0.25 s, so each accent gets a new crack |
+| 37 | Signature · Riser Tension | risers, swells, drops | Never breaks on a swell but crackles louder and faster under it; the drop's first hit breaks it |
+| 38 | Signature · Singing Lake Ice | percussion, FX | Every hit sends a falling crack whistle through lake ice, refreezing in ~2.5 s |
+| 39 | Signature · Controlled Demolition | anything; press Detonate | Music can't break it; Detonate fires a rolling chain of charges, collapse and aftershocks |
+| 40 | Signature · Hearth Crackle | acoustic, keys, vocals | Charred timber that splinters and re-sets on every note: the reverb crackles like a fire |
+| 41 | Signature · Breath Abyss | spoken word, vocals | A near-gone hull, fully ducked: the abyss rises only in the pauses |
+| 42 | Signature · Sinkhole | 808s, bass, kicks | Floor caved into a flooded cavern: the low tail wobbles under water, the top stays tight |
+| 43 | Signature · Thunder Sheet | claps, snares, foley | A hanging steel sheet roars and buckles on every hit, rolling back off the canyon walls |
+| 44 | Signature · Rising From Rubble | intros, pads | Starts as rubble and rebuilds while the music is quiet, closing into a bright room |
+| 45 | Signature · Booth to Stadium | vocals, drums | Dead booth at verse level; chorus hits breach it and a stadium blooms through, then seals |
+| 46 | Signature · Breakage Foley Printer | drum loops (print it) | 100 % wet glass that breaks on every hit and re-glazes: a glass layer locked to the groove |
+| 47 | Signature · Glacier Groan | bass, drones | Only long low notes strain it: groans, pops and falling whistles over a bottomless drone |
+| 48 | Signature · Distant Front Line | drums, FX | Your sound a kilometre away: 250 ms of travel, highs lost, hits answered by distant blasts |
 
 Audition renders of every preset (the same drums → bass → impact → tail script) are written to
 `renders/presets/` by `rb_plugin_smoke`. The smoke test also checks that every preset is finite and
@@ -673,7 +726,13 @@ Plugin smoke test (`rb_plugin_smoke`, the real `AudioProcessor`):
 * **Processing and state:** random host block sizes (1–1024) stay finite and bounded. Damage and
   parameters survive save/recall. Rebuild fires once on its rising edge.
 * **Presets:** every preset renders a 10 s audition. The limited peak stays ≤ 0 dBFS, and the
-  pre-limiter peak stays < 2 (worst 1.14).
+  pre-limiter peak stays < 2 (worst 1.09).
+* **Signature presets do what they say:** one check per preset against its description. Examples:
+  Consonant Shards breaks on plosives but not on sung vowels; Kick-Torn Cathedral breaks only from
+  the sidechain; Riser Tension survives a swell and breaks on the drop; Controlled Demolition holds
+  through 0 dBFS drums and falls only to Detonate; Breath Abyss's wet level is 19 dB higher in the
+  gaps than under the words; Rising From Rubble goes from 3 % to 71 % over a 30 s quiet intro; the
+  rest break on −6 dBFS hits as described.
 * **New controls:**
   * DETONATE damages every wall, fires once and is audible on silence.
   * FREEZE holds the tail (86 % after 7 s), and release lets it decay.

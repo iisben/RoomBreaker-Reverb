@@ -30,7 +30,9 @@ void StressTracker::reset()
     peakEnv.fill (0.0f);
     prevPeakEnv.fill (0.0f);
     inputPeak_ = inputPeakEnv = 0.0f;
-    accPkL = accPkR = accPkM = accPkS = accPkAny = accLfEnergy = 0.0f;
+    rmsEnv = slopeEnv = prevL = prevR = 0.0f;
+    onsetOpen = 0.0f;
+    accPkL = accPkR = accPkM = accPkS = accPkAny = accLfEnergy = accEnergy = accSlope = 0.0f;
     accIndex = accCount = 0;
     resetStructure();
 }
@@ -65,6 +67,11 @@ void StressTracker::accumulate (const float* L, const float* R, int n) noexcept
 
         const float lf = 0.5f * (lfL.process (l).lp + lfR.process (r).lp);
         accLfEnergy += lf * lf;
+        const float dl = l - prevL, dr = r - prevR;
+        prevL = l;
+        prevR = r;
+        accEnergy += 0.5f * (l * l + r * r);
+        accSlope  += 0.5f * (dl * dl + dr * dr);
     }
     accCount += n;
 }
@@ -80,7 +87,14 @@ void StressTracker::finishAnalysis() noexcept
     const float lfRms = std::sqrt (accLfEnergy / (float) n) * 1.41421356f;
     lfAcc += (lfRms - lfAcc) * (1.0f - std::exp (-dt / kFatigueTau));
 
-    accPkL = accPkR = accPkM = accPkS = accPkAny = accLfEnergy = 0.0f;
+    const float rms = std::sqrt (accEnergy / (float) n), slope = std::sqrt (accSlope / (float) n);
+    const bool jump = rms > kOnsetRatio * rmsEnv + 1.0e-5f || slope > kOnsetRatio * slopeEnv + 1.0e-6f;
+    onsetOpen = jump ? kOnsetHold : std::max (0.0f, onsetOpen - dt);
+    const float onsetRelease = std::exp (-dt / kOnsetRelease);
+    rmsEnv   = std::max (rms, rmsEnv * onsetRelease);
+    slopeEnv = std::max (slope, slopeEnv * onsetRelease);
+
+    accPkL = accPkR = accPkM = accPkS = accPkAny = accLfEnergy = accEnergy = accSlope = 0.0f;
     accIndex = accCount = 0;
 
     // Directional load mapping (listener faces North, source is in front).
@@ -111,14 +125,24 @@ int StressTracker::detonate (FractureEvent* events, int maxEvents) noexcept
     const float scale = (0.75f + 0.5f * brittle) / std::sqrt (std::max (strength, 0.3f));
     int numEvents = 0;
 
-    for (int w = 0; w < kNumWalls; ++w)
+    // Like a real demolition, the charges fire in sequence, not at once: a random order, 30 to
+    // 110 ms apart, so it is heard as a rolling chain of bangs that runs into the collapse.
+    // The damage itself lands now (the sounds carry the delays in their sample offsets).
+    std::array<int, kNumWalls> order { 0, 1, 2, 3, 4, 5 };
+    for (int i = kNumWalls - 1; i > 0; --i)
+        std::swap (order[(size_t) i], order[(size_t) std::min (i, (int) (rng.uni() * (float) (i + 1)))]);
+
+    float at = rng.uni() * 0.25f * (float) lastBlockLength / fs;
+    for (int k = 0; k < kNumWalls; ++k)
     {
+        const int w = order[(size_t) k];
         float& I = integrity_[w];
         const float chunk = std::clamp ((0.2f + 0.18f * rng.uni()) * scale, 0.12f, 0.6f);
         I = std::max (0.0f, I - chunk);
         cooldown[w] = kFractureCooldown;
         if (numEvents < maxEvents)
-            events[numEvents++] = { w, 1.0f + 0.3f * rng.uni(), (int) (rng.uni() * 0.25f * (float) lastBlockLength), true };
+            events[numEvents++] = { w, 1.0f + 0.3f * rng.uni(), (int) (at * fs), true };
+        at += 0.03f + 0.08f * rng.uni();
     }
     return numEvents;
 }
@@ -159,7 +183,7 @@ int StressTracker::updateStructure (float dt, FractureEvent* events, int maxEven
         cooldown[w] = std::max (0.0f, cooldown[w] - dt);
         const float transient = alpha * blockPeak[w] * load;
         const float threshold = capacity * fractureAt;
-        const bool  rising    = blockPeak[w] > 1.25f * prevPeakEnv[w] + 1.0e-4f;
+        const bool  rising    = onsetOpen > 0.0f && blockPeak[w] > 1.25f * prevPeakEnv[w] + 1.0e-4f;
 
         if (I > 0.0f && cooldown[w] <= 0.0f && rising && transient > threshold)
         {

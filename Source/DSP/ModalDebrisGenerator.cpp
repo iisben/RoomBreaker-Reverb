@@ -89,18 +89,24 @@ void ModalDebrisGenerator::trigger (const FractureEvent& e) noexcept
     const auto& m = *material;
     const int w = std::clamp (e.wall, 0, kNumWalls - 1);
     const int numModes = std::clamp (3 + (int) (e.magnitude * 5.0f), 2, 8);
-    const float burstSec = e.brittle ? lerp (0.0008f, 0.004f, rng.uni())   // crack: sharp click
-                                     : lerp (0.006f, 0.02f, rng.uni());    // creak: scraping groan
-    const int burst = (int) (burstSec * fs);
+    const float weight = clamp01 (e.magnitude / 1.2f);     // 0 hairline .. 1 collapse
+    // A harder break strikes the pieces harder: a shorter excitation, so a brighter ring.
+    const float burstSec = e.brittle ? lerp (0.004f, 0.0006f, weight) * (0.7f + 0.6f * rng.uni())   // crack: click
+                                     : lerp (0.006f, 0.02f, rng.uni());                              // creak: scrape
+    const int burst = std::max (1, (int) (burstSec * fs));
+    // Bigger breaks free bigger pieces, and a bigger piece rings lower.
+    const float sizeScale = e.brittle ? 1.25f - 0.4f * weight : 1.0f;
+    // The pieces are struck as the crack reaches them, not all at once.
+    const float spreadSec = e.brittle ? 0.0015f + 0.02f * weight : 0.0015f;
 
     for (int i = 0; i < numModes; ++i)
     {
         const int idx = std::min (7, i + (rng.uni() < 0.3f ? 1 : 0));
         const float ratio = m.modeRatios[(size_t) idx];
-        const float freq  = m.modeBaseHz * ratio * kWallFreqScale[w] * (1.0f + 0.035f * rng.bi());
+        const float freq  = m.modeBaseHz * ratio * sizeScale * kWallFreqScale[w] * (1.0f + 0.035f * rng.bi());
         const float t60   = m.modeT60 * (0.6f + 0.8f * rng.uni()) / std::sqrt (ratio) * (1.0f + looseness[w]);
         const float amp   = 0.35f * e.magnitude * (0.6f + 0.4f * rng.uni()) / std::sqrt ((float) (i + 1));
-        const int delay   = e.sampleOffset + (int) (rng.uni() * 0.0015f * fs);
+        const int delay   = e.sampleOffset + (int) (rng.uni() * rng.uni() * spreadSec * fs);
         startMode (freq, t60, amp, delay, burst, kWallPan[w] + 0.35f * rng.bi());
     }
 
@@ -125,7 +131,8 @@ void ModalDebrisGenerator::updateChatter (float dt, int blockLength) noexcept
         const float rate = 30.0f * chatterEnergy[w] + 18.0f * looseness[w] * activity; // events / s
         if (rng.uni() < rate * dt)
         {
-            const float amp = (0.04f + 0.12f * rng.uni()) * (0.5f + chatterEnergy[w] + looseness[w]) * 0.35f;
+            const float size = rng.uni();
+            const float amp = (0.03f + 0.2f * size * size * size) * (0.5f + chatterEnergy[w] + looseness[w]) * 0.35f;   // mostly faint
             const int idx   = 3 + (int) (rng.uni() * 5.0f);  // small fragments → upper modes
             const float ratio = m.modeRatios[(size_t) std::min (idx, 7)];
             startMode (m.modeBaseHz * ratio * kWallFreqScale[w] * (1.0f + 0.06f * rng.bi()),
