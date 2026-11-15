@@ -111,7 +111,13 @@ void RoomBreakerAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 double RoomBreakerAudioProcessor::getTailLengthSeconds() const
 {
     // Room tail, or the exterior void's own RT60 when it collects energy (Abyssal Drone: 90 s).
-    const double roomTail = (double) params.decaySeconds() * 1.5 + 2.0 + 0.25;
+    // A break goes on sounding after the input stops (aftershocks, rubble settling) and that
+    // sound rings in the room too, so the settle time is added whenever destruction is audible.
+    // Hosts stop calling a plugin once this has passed, so anything later would be cut off.
+    const auto p = params.snapshot();
+    const bool breaksAudible = p.impact > 0.0f || p.rumble > 0.0f || p.debrisLevel > 0.0f;
+    const double roomTail = (double) p.decaySeconds * 1.5 + 2.0 + 0.25
+                          + (breaksAudible ? (double) rb::dsp::ImpactGenerator::kMaxSettleSeconds : 0.0);
     const auto& exteriorVoid = rb::dsp::getVoidProfile (params.voidIndex());
     return exteriorVoid.collects ? std::max (roomTail, (double) exteriorVoid.rt60 * 1.2) : roomTail;
 }

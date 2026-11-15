@@ -48,6 +48,9 @@ public:
     static constexpr int kNumCreaks    = 4;
     static constexpr int kNumSequences = 6;    // aftershock sequences
     static constexpr int kQueueSize    = 384;  // landings and bounces still in the air
+    /** Longest a break keeps sounding after the input stops: aftershocks run 5 s, and rubble at
+        its cap settles in about 6 s. The plugin adds this to the tail it reports to the host. */
+    static constexpr float kMaxSettleSeconds = 7.0f;
 
     void prepare (double sampleRate);
     void reset();

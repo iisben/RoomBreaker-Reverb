@@ -819,6 +819,57 @@ int main (int argc, char** argv)
         }
     }
 
+    //--------------------------------------------------------------------------
+    // Silence in, silence out. A fresh room must output digital zero, and once a passage that
+    // breaks the room has stopped, everything (reverb, aftershocks, rubble) must be over by the
+    // tail length the plugin reports: hosts stop calling it then, and analyzers flag whatever is
+    // left as noise. Rubble used to trickle on for 10-25 s after a break, well past the tail.
+    std::printf ("\n-- Silence in, silence out --\n");
+    {
+        juce::MidiBuffer midi;
+        bool freshSilent = true, settled = true;
+        double worstAfter = -600.0;
+        juce::String worstName;
+        for (int prog = 0; prog < plugin->getNumPrograms(); ++prog)
+        {
+            std::unique_ptr<juce::AudioProcessor> p (createPluginFilter());
+            p->setRateAndBufferSizeDetails (48000.0, 512);
+            p->prepareToPlay (48000.0, 512);
+            p->setCurrentProgram (prog);
+            juce::AudioBuffer<float> buf (2, 512);
+            juce::Random noiseGen (11);
+
+            auto runFor = [&] (double fromSec, double toSec, bool audition, float& peak)
+            {
+                for (int64_t pos = (int64_t) (fromSec * 48000.0); pos < (int64_t) (toSec * 48000.0); pos += 512)
+                {
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        float l = 0.0f, r = 0.0f;
+                        if (audition) auditionSample ((double) (pos + i) / 48000.0, noiseGen, l, r);
+                        buf.setSample (0, i, l); buf.setSample (1, i, r);
+                    }
+                    p->processBlock (buf, midi);
+                    peak = std::max (peak, buf.getMagnitude (0, 512));
+                }
+            };
+
+            float fresh = 0.0f, loud = 0.0f, after = 0.0f;
+            runFor (0.0, 2.0, false, fresh);                         // nothing in: exactly nothing out
+            runFor (0.0, 7.0, true, loud);                           // drums, sub bass and a 0 dBFS hit
+            const double tail = p->getTailLengthSeconds();
+            runFor (0.0, tail, false, loud);                         // let it ring out for the reported tail
+            runFor (0.0, 1.0, false, after);                         // then: what a host would cut off
+            freshSilent = freshSilent && fresh == 0.0f;
+            const double afterDb = juce::Decibels::gainToDecibels ((double) after, -600.0);
+            if (afterDb > worstAfter) { worstAfter = afterDb; worstName = p->getProgramName (prog); }
+            settled = settled && afterDb < -80.0;
+        }
+        check (freshSilent, "every preset: digital silence in gives digital silence out");
+        std::printf ("    loudest output after the reported tail: %.1f dBFS (%s)\n", worstAfter, worstName.toRawUTF8());
+        check (settled, "every preset: after a passage that breaks the room, quiet (< -80 dBFS) by the reported tail length");
+    }
+
 
     //--------------------------------------------------------------------------
     std::printf ("\n-- Bypass and meters --\n");

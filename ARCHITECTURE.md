@@ -291,10 +291,19 @@ The modal debris gives a fracture its pitch; this layer gives it weight. Voiced 
 * **Creak**: ductile damage (plastic yield, fatigue) is a stick-slip pulse train through a resonance
   (`creakHz`, `creakQ`), at `creakRate` pulses per second, with grit, instead of a noise scrape.
 * **Rubble**: Poisson noise grains plus a low rumble bed, both driven by a rubble energy that every
-  fracture and every landing adds to (it settles over 2.5 s). Loose walls under load keep it trickling.
+  fracture and every landing adds to. Loose walls under load keep it trickling. It settles with a
+  time constant of 2.5 s × the rubble left (clamped 0.3–1), so a pile settles faster as less is
+  left to fall, and the last grains are smaller as well as rarer. Below 0.03 everything has come to
+  rest: the bed and trickle reach zero there and the rubble is cleared. (An exponential alone never
+  ends: grains used to keep dropping at a fixed size for 10–25 s after a break, past the reported tail.)
 
 Landings, bounces and aftershocks wait in a queue of up to 384 events, timed on the control grid,
 so the result is the same at any host block size.
+
+**Reported tail.** `getTailLengthSeconds` is the room tail (1.5 × Decay + 2.25 s) plus, whenever
+Impact, Rumble or Debris is above zero, `ImpactGenerator::kMaxSettleSeconds` (7 s: aftershocks run
+5 s and rubble at its cap settles in about 6 s), or the outside space's own tail when it collects
+energy (1.2 × its RT60), whichever is longer. Hosts stop processing once it has passed.
 * **Shock** (in `Engine`): a fracture envelope (τ 0.35 s) that stretches every FDN line by up to
   1.6 %, so the room's pitch flexes on big hits.
 
@@ -733,6 +742,10 @@ Plugin smoke test (`rb_plugin_smoke`, the real `AudioProcessor`):
   through 0 dBFS drums and falls only to Detonate; Breath Abyss's wet level is 19 dB higher in the
   gaps than under the words; Rising From Rubble goes from 3 % to 71 % over a 30 s quiet intro; the
   rest break on −6 dBFS hits as described.
+* **Silence in, silence out:** every preset outputs digital zero for digital zero in. After 7 s of
+  drums, sub bass and a 0 dBFS hit, every preset is below −80 dBFS once its reported tail has
+  passed (loudest: −91 dBFS, Infinite Void Drone's outside space; before the rubble fix, Breakage
+  Foley Printer was still at −28 dBFS there).
 * **New controls:**
   * DETONATE damages every wall, fires once and is audible on silence.
   * FREEZE holds the tail (86 % after 7 s), and release lets it decay.

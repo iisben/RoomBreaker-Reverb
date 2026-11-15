@@ -16,6 +16,7 @@ namespace
     constexpr float kGrainLevel    = 0.22f;
     constexpr float kBedLevel      = 0.35f;
     constexpr float kRubbleTau     = 2.5f;    // s
+    constexpr float kRubbleSettled = 0.03f;   // rubble energy below which everything has come to rest
     constexpr float kStoreyMetres  = 2.8f;    // ceiling height at Size 1
     constexpr float kGravity       = 9.81f;
     constexpr float kOmoriC        = 0.15f;   // s: aftershock rate ~ k / (t + c)^p
@@ -464,9 +465,17 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
 
     // --- rubble: loose slabs under load keep shedding dust
     rubble += 0.35f * meanLooseness * clamp01 (activity * 2.0f) * dt;
-    rubble = std::min (3.0f, rubble) * std::exp (-dt / kRubbleTau);
+    // A pile settles faster as less is left to fall: the time constant shrinks with the rubble.
+    rubble = std::min (3.0f, rubble) * std::exp (-dt / (kRubbleTau * std::clamp (rubble, 0.3f, 1.0f)));
 
-    const float bedTarget = kBedLevel * rumbleAmount * std::min (rubble, 1.5f);
+    // Once the last of it has settled the room goes quiet. Measured above the settle floor, the
+    // bed and the trickle both reach zero there, and then the rubble is cleared: an exponential
+    // alone never ends, and the grains used to keep dropping for 10-25 s after a break.
+    const float loose = std::max (0.0f, rubble - kRubbleSettled);
+    if (rubble < kRubbleSettled)
+        rubble = 0.0f;
+
+    const float bedTarget = kBedLevel * rumbleAmount * std::min (loose, 1.5f);
     bedAmpInc = (bedTarget - bedAmp) / (float) std::max (blockLength, 1);
     const float bedHz = std::clamp (v.boomHz * 1.6f, 45.0f, 160.0f);
     bedL.set (bedHz, 0.8f, fs);
@@ -475,8 +484,10 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
     if (rumbleAmount <= 0.0f)
         return;
 
-    // Trickle: Poisson grains, mostly small, heavier when lots is coming down.
-    const float rate = 70.0f * std::min (rubble, 2.0f) * rumbleAmount;   // grains / s
+    // Trickle: Poisson grains, mostly small, heavier when lots is coming down. The last ones are
+    // fewer and smaller too: dust, not stones.
+    const float rate = 70.0f * std::min (loose, 2.0f) * rumbleAmount;   // grains / s
+    const float last = smoothstep (0.0f, 0.3f, loose);
     float expected = rate * dt;
     while (expected > 0.0f)
     {
@@ -484,7 +495,7 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
         {
             const float size = rng.uni() * rng.uni();
             const float hz   = v.rubbleHz * (0.45f + 1.4f * (1.0f - size)) * (1.0f + 0.1f * rng.bi());
-            const float amp  = kGrainLevel * rumbleAmount * (0.25f + 0.75f * size) * std::min (1.0f, 0.4f + 0.4f * rubble);
+            const float amp  = kGrainLevel * rumbleAmount * (0.25f + 0.75f * size) * std::min (1.0f, 0.4f + 0.4f * rubble) * last;
             startNoise (hz, 0.7f, amp, 3.0f + 22.0f * size, (int) (rng.uni() * block), 0.9f * rng.bi());
         }
         expected -= 1.0f;
