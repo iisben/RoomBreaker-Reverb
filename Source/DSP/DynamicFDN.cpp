@@ -410,16 +410,19 @@ void DynamicFDN::updateControl (const WallArray& I, const MaterialProfile& m,
     for (int k = 0; k < N; ++k)
     {
         auto& mo = motion[(size_t) k];
-        mo.creakNoise += (rng.bi() - mo.creakNoise) * 0.02f;
-        mo.wander += (rng.bi() - mo.wander) * wanderA;
+        mo.creakRaw   += (rng.bi() - mo.creakRaw) * 0.02f;
+        mo.creakNoise += (mo.creakRaw - mo.creakNoise) * 0.02f;
+        mo.wanderRaw  += (rng.bi() - mo.wanderRaw) * wanderA;
+        mo.wander     += (mo.wanderRaw - mo.wander) * wanderA;
 
         const float c = mo.lfoC * mo.rotC - mo.lfoS * mo.rotS, s = mo.lfoS * mo.rotC + mo.lfoC * mo.rotS;
         const float keep = 1.5f - 0.5f * (c * c + s * s);   // hold the phasor on the unit circle
         mo.lfoC = c * keep;
         mo.lfoS = s * keep;
 
-        const float drift = motionDepth * (0.7f * mo.lfoS + 0.6f * mo.wander);
-        const float targetD = std::clamp (mo.baseD * stretch + drift + mo.loose * 0.0018f * fs * mo.creakNoise, 4.0f, maxDelay);
+        // x1.41: the second smoothing stage halves the drift's variance; this keeps its depth.
+        const float drift = motionDepth * (0.7f * mo.lfoS + 0.85f * mo.wander);
+        const float targetD = std::clamp (mo.baseD * stretch + drift + mo.loose * 0.0025f * fs * mo.creakNoise, 4.0f, maxDelay);
         bank.DInc[k] = (targetD - bank.D[k]) * invN;
     }
 

@@ -124,7 +124,10 @@ private:
     /** Control-rate state per line. */
     struct Motion
     {
-        float creakNoise = 0.0f, wander = 0.0f;
+        // Random drift is smoothed twice: once for its position and once for its rate. Pitch follows
+        // the rate a line's length changes, so a single stage left white jitter in the pitch, every
+        // tick, and spread every tone in the tail into a skirt of noise (-22 dBc around 8 kHz).
+        float creakNoise = 0.0f, creakRaw = 0.0f, wander = 0.0f, wanderRaw = 0.0f;
         float lfoC = 1.0f, lfoS = 0.0f;       // unit phasor: the line's slow drift oscillator
         float rotC = 1.0f, rotS = 0.0f;       // its rotation per control tick
         float baseD = 1000.0f, loose = 0.0f, targetGain = 0.0f, targetShelfG = 0.0f, targetHf = 1.0f;

@@ -158,7 +158,7 @@ spec   = Π I_w^scatterExp                            share that stays specular
 g_spec = geo · ΠR · spec
 g_diff = geo · ΠR · √(1 − spec²)                     energy-preserving split → 4-stage allpass diffuser
 delay  = imageDelay + jitterMax · dmg^1.5 · max(0, 1 + 3·n(t))
-n(t)   = per-tap random walk, low-passed to ~5 Hz
+n(t)   = per-tap random walk, ~1 Hz, smoothed twice
 ```
 
 Taps are panned from the image's azimuth with an equal-power law. Diffuser feedback rises with mean
@@ -275,7 +275,10 @@ The modal debris gives a fracture its pitch; this layer gives it weight. Voiced 
   sines. That merge took the hottest preset peaks from +3.5 dB to +2.3 dB.
 * **Warning crackle**: real structures click before they fail (acoustic emission). Once a wall's
   stress ratio passes 0.55, faint ticks start, getting denser and louder up to the breaking point
-  (1.05), so a slow swell is heard straining the room before anything gives.
+  (1.05), so a slow swell is heard straining the room before anything gives. Like real materials
+  (the Kaiser effect) a wall only emits while its load climbs past what it carried in the last ~2 s,
+  at full rate from 0.25 × capacity per second: a riser crackles, a held note or a steady sweep does
+  not. (Crackling under any steady load read as aliasing and intermodulation in analyzers.)
 * **Crack**: not one burst but a propagating crack. A fracture fires a cascade of micro-cracks over
   the material's `spreadMs` (3 ms glass … 60 ms timber), sizes drawn from a power law (many small,
   few big), each a band-passed noise click panned to the wall. Bigger breaks go deeper and longer.
@@ -334,7 +337,13 @@ without any real onset, no longer break walls by chance.
   0.75 × density. Echo density over 30–120 ms rises from 0.30 (Density 0) to 0.60 (70 %).
 * **Motion**: each line drifts on its own sine (0.23–0.81 Hz) plus a smoothed random walk, up to
   ±1.2 ms. Loop gain uses the unmodulated length so the decay doesn't pump. Fixed-peak ringing in the
-  0.5–1.6 s tail falls from 5.0 dB (Motion 0) to 4.4 dB (25 %) and 4.1 dB (60 %).
+  0.5–1.6 s tail falls from 4.64 dB (Motion 0) to 4.41 dB (25 %) and 4.15 dB (60 %).
+  The random walk is smoothed twice, for its position and for its rate. Pitch follows the rate a
+  line's length changes, so with one stage the pitch jumped every control tick: white jitter that
+  spread every tone in the tail into a skirt of noise 20–500 Hz wide. Now the only thing near a held
+  tone is Motion's slow detune (about ±2 cents at 25 %). The loose-slab creak and the early
+  reflections' crack jitter are smoothed the same way, and the crack jitter is slow (~1 Hz): at
+  ~7 Hz it warbled a ruined room's reflections by 1.5–3.5 %.
 * **Freeze**: each line crossfades to its raw tap at gain 0.99998, with no filters, no injection
   and no venting. It is a convex mix of two paths with |H| ≤ 1, so it cannot become unstable. The
   structure also stops: no damage, no healing.
@@ -719,7 +728,7 @@ cmake --build build -j8                          # VST3, AU, Standalone, both te
 | AddressSanitizer + UndefinedBehaviorSanitizer, ThreadSanitizer | clean |
 | CPU (core, 1x) | ~135× real time, one core, Apple Silicon. Per sample: 105 ns intact (was 123), 105 ns while being destroyed (was 125), 144 ns cracked but static (was 131: 24 interpolated reflections plus twice the tank lines) |
 | CPU (plugin, 10 s noise) | 1x 155×, 2x 95×, 4x 45× real time |
-| Quality: Motion | tail ringing 4.6 → 4.5 → 4.0 dB (Motion 0 / 25 / 60 %) |
+| Quality: Motion | tail ringing 4.64 → 4.41 → 4.15 dB (Motion 0 / 25 / 60 %) |
 | Quality: Density | echo density 30–120 ms 0.34 → 0.70 (Density 0 / 70 %). Tank alone at 70 %: fully dense (1.0) by 120 ms, was 200 ms |
 | Sanitizers | core harness under ASan + UBSan: all checks pass, 0 reports |
 | Rate independence | mean integrity on the same script 0.306 / 0.305 / 0.304 at 48 / 96 / 192 kHz |
@@ -746,6 +755,11 @@ Plugin smoke test (`rb_plugin_smoke`, the real `AudioProcessor`):
   drums, sub bass and a 0 dBFS hit, every preset is below −80 dBFS once its reported tail has
   passed (loudest: −91 dBFS, Infinite Void Drone's outside space; before the rubble fix, Breakage
   Foley Printer was still at −28 dBFS there).
+* **Tone purity:** a held −6 dBFS tone through the default room has spurious content (everything
+  but the tone ±20 Hz, its harmonics and IM products) below −62 dBc at 800 Hz (now −68.5; it was
+  −57 before the Motion and crackle fixes), below −55 dBc at 3 kHz (−59.5; was −49) and below −62 dBc
+  for a 700 + 900 Hz pair (−65.6; was −54). In Bombed Cathedral, which starts ruined: below −28 dBc at
+  800 Hz and −32 dBc at 3 kHz (−33 / −40.5; was −23 / −15).
 * **New controls:**
   * DETONATE damages every wall, fires once and is audible on silence.
   * FREEZE holds the tail (86 % after 7 s), and release lets it decay.

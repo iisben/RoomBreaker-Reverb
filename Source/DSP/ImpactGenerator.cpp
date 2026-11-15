@@ -22,6 +22,8 @@ namespace
     constexpr float kOmoriC        = 0.15f;   // s: aftershock rate ~ k / (t + c)^p
     constexpr float kOmoriP        = 1.15f;
     constexpr float kSettleSeconds = 5.0f;
+    constexpr float kLoadMemorySeconds = 2.0f;   // Kaiser memory: how long a wall remembers its peak load
+    constexpr float kLoadRiseFull = 0.25f;       // load climbing this fast (× capacity per s) crackles at full rate
     constexpr float kKnee          = 0.5f;    // impact bus: linear below, tanh-rounded above (ceiling ~0.9)
 
     inline float softKnee (float x) noexcept
@@ -57,6 +59,8 @@ void ImpactGenerator::reset()
     numPending = 0;
     stressRatio.fill (0.0f);
     integrityNow.fill (1.0f);
+    loadMemory.fill (0.0f);
+    loadRise.fill (0.0f);
     rubble = bedAmp = bedAmpInc = 0.0f;
     bedL.reset(); bedR.reset();
     dcL.reset(); dcR.reset();
@@ -443,14 +447,30 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
         }
     }
 
-    // --- warning: an overloaded wall crackles before it breaks
+    // --- warning: an overloaded wall crackles before it breaks, while its load is climbing.
+    // Kaiser effect: a material only emits once the load passes what it has recently carried,
+    // so the crackle follows a rising load (a riser, a crescendo) and stops on a steady one. The
+    // memory fades over a couple of seconds once the load drops (healing, and the Felicity effect).
+    {
+        const float relax = std::exp (-dt / kLoadMemorySeconds);
+        const float riseA = 1.0f - std::exp (-dt / 0.05f);
+        for (int w = 0; w < kNumWalls; ++w)
+        {
+            const float r = stressRatio[(size_t) w];
+            float& memory = loadMemory[(size_t) w];
+            const float passing = std::max (0.0f, r - memory) / std::max (dt, 1.0e-6f);   // ratio / s above the memory
+            loadRise[(size_t) w] += (passing - loadRise[(size_t) w]) * riseA;
+            memory = std::max (r, r + (memory - r) * relax);
+        }
+    }
     if (impactAmount > 0.0f)
     {
         for (int w = 0; w < kNumWalls; ++w)
         {
             if (integrityNow[(size_t) w] < 0.02f)
                 continue;
-            const float x = smoothstep (0.55f, 1.05f, stressRatio[(size_t) w]);
+            const float x = smoothstep (0.55f, 1.05f, stressRatio[(size_t) w])
+                          * clamp01 (loadRise[(size_t) w] / kLoadRiseFull);
             if (x <= 0.0f)
                 continue;
             if (rng.uni() < 12.0f * x * x * dt)

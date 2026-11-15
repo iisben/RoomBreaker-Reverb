@@ -870,6 +870,80 @@ int main (int argc, char** argv)
         check (settled, "every preset: after a passage that breaks the room, quiet (< -80 dBFS) by the reported tail length");
     }
 
+    //--------------------------------------------------------------------------
+    // Tone purity. A held tone through the default room may come back detuned by Motion (a few Hz
+    // of chorus around it) but nothing else: no jitter skirt, no crackle from a steady load.
+    // Analyzers read both as aliasing and intermodulation. Before the fixes: 800 Hz -57 dBc,
+    // 3 kHz -49 dBc; a 700 + 900 Hz pair -54 dBc.
+    std::printf ("\n-- Tone purity (default room, -6 dBFS) --\n");
+    {
+        constexpr int order = 16, N = 1 << order;
+        constexpr double fs = 48000.0, hz = fs / N;
+        juce::dsp::FFT fft (order);
+        juce::dsp::WindowingFunction<float> window ((size_t) N, juce::dsp::WindowingFunction<float>::blackmanHarris, false);
+        juce::MidiBuffer midi;
+
+        // Spurious power, relative to the first tone, outside +-20 Hz of each tone and +-4.4 Hz of
+        // each harmonic and low-order IM product.
+        auto spurious = [&] (std::vector<double> tones, double amp, const char* preset = nullptr)
+        {
+            std::unique_ptr<juce::AudioProcessor> p (createPluginFilter());
+            p->setRateAndBufferSizeDetails (fs, 512);
+            p->prepareToPlay (fs, 512);
+            if (preset != nullptr) p->setCurrentProgram (findProgram (*p, preset));
+            juce::AudioBuffer<float> buf (2, 512);
+            std::vector<float> out;
+            const int64_t total = (int64_t) (2.0 * fs) + N;
+            for (int64_t pos = 0; pos < total; pos += 512)
+            {
+                for (int i = 0; i < 512; ++i)
+                {
+                    double x = 0.0;
+                    for (double f : tones) x += amp * std::sin (juce::MathConstants<double>::twoPi * f * (double) (pos + i) / fs);
+                    buf.setSample (0, i, (float) x); buf.setSample (1, i, (float) x);
+                }
+                p->processBlock (buf, midi);
+                out.insert (out.end(), buf.getReadPointer (0), buf.getReadPointer (0) + 512);
+            }
+            std::vector<float> spec (2 * N, 0.0f);
+            std::copy (out.end() - N, out.end(), spec.begin());
+            window.multiplyWithWindowingTable (spec.data(), (size_t) N);
+            fft.performFrequencyOnlyForwardTransform (spec.data());
+
+            std::vector<char> keep (N / 2, 1);
+            auto drop = [&] (double f, double w)
+            {
+                for (int k = std::max (0, (int) ((f - w) / hz)); k <= std::min (N / 2 - 1, (int) ((f + w) / hz)); ++k) keep[(size_t) k] = 0;
+            };
+            drop (0.0, 20.0);
+            double ref = 0.0;
+            for (int k = (int) ((tones[0] - 4.4) / hz); k <= (int) ((tones[0] + 4.4) / hz); ++k) ref += (double) spec[(size_t) k] * spec[(size_t) k];
+            for (double f : tones)
+            {
+                drop (f, 20.0);
+                for (int h = 2; h * f < fs / 2; ++h) drop (h * f, 4.4);
+            }
+            if (tones.size() == 2)
+                for (double f : { tones[1] - tones[0], tones[0] + tones[1], 2 * tones[0] - tones[1], 2 * tones[1] - tones[0] })
+                    if (f > 0.0) drop (f, 4.4);
+            double other = 0.0;
+            for (int k = 0; k < N / 2; ++k)
+                if (keep[(size_t) k]) other += (double) spec[(size_t) k] * spec[(size_t) k];
+            return 10.0 * std::log10 (other / ref + 1e-30);
+        };
+
+        const double s800 = spurious ({ 800.0 }, 0.5), s3k = spurious ({ 3000.0 }, 0.5), pair = spurious ({ 700.0, 900.0 }, 0.25);
+        std::printf ("    spurious: 800 Hz %.1f dBc, 3 kHz %.1f dBc, 700 + 900 Hz %.1f dBc\n", s800, s3k, pair);
+        check (s800 < -62.0 && s3k < -55.0 && pair < -62.0,
+               "held tones come back clean: no motion jitter, no crackle under a steady load");
+
+        // A ruin: cracked walls scatter their reflections, but slowly. The crack jitter used to
+        // warble them by 1.5-3.5 % (Bombed Cathedral: 800 Hz -23 dBc, 3 kHz -15 dBc).
+        const double r800 = spurious ({ 800.0 }, 0.5, "Bombed Cathedral"), r3k = spurious ({ 3000.0 }, 0.5, "Bombed Cathedral");
+        std::printf ("    Bombed Cathedral (starts ruined): 800 Hz %.1f dBc, 3 kHz %.1f dBc\n", r800, r3k);
+        check (r800 < -28.0 && r3k < -32.0, "a ruined room scatters its reflections without warbling held tones");
+    }
+
 
     //--------------------------------------------------------------------------
     std::printf ("\n-- Bypass and meters --\n");

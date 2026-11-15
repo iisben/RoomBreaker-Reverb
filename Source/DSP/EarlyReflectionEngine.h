@@ -51,7 +51,7 @@ private:
     {
         int wallA = 0, wallB = -1;
         float baseDelay = 2.0f, geoGain = 0.0f, panL = 0.707f, panR = 0.707f;
-        float noise = 0.0f, jitter = 0.0f;
+        float noise = 0.0f, noiseRaw = 0.0f, jitter = 0.0f;   // jitter walk, smoothed twice (see DynamicFDN::Motion)
         float delayTarget = 2.0f;
         int   whole = 2;                      // the delay in whole samples, used while `still`
         bool  still = false;

@@ -4,6 +4,8 @@ namespace rb::dsp
 {
 namespace
 {
+    constexpr float kJitterWalk   = 0.008f;   // per control tick (~750 Hz): a ~1 Hz random walk
+    constexpr float kJitterSpread = 8.5f;     // how far it wanders, in units of the wall's jitter depth
     struct Vec3 { float x, y, z; };
 
     constexpr float kSpeedOfSound = 343.0f;
@@ -67,7 +69,7 @@ void EarlyReflectionEngine::reset()
         tapDelayInc[k] = 0.0f;
         t.whole = wholeDelay[k] = (int) tapDelay[k];
         t.still = false;
-        t.noise = t.jitter = 0.0f;
+        t.noise = t.noiseRaw = t.jitter = 0.0f;
     }
     for (int c = 0; c < 4; ++c)
         for (int k = 0; k < kNumTaps; ++k)
@@ -229,9 +231,13 @@ void EarlyReflectionEngine::updateControl (const WallArray& I, const MaterialPro
         float target = moving ? t.baseDelay : std::round (t.baseDelay);
         if (t.jitter > 0.0f)
         {
-            // Micro-jitter: low-passed random walk (~5 Hz), depth grows with cracking.
-            t.noise += (rng.bi() - t.noise) * 0.06f;
-            target = std::min (t.baseDelay + t.jitter * std::max (0.0f, 1.0f + 3.0f * t.noise), maxDelay);
+            // Micro-jitter: a cracked surface scatters each reflection to a slightly different
+            // time, and the depth grows with cracking. The walk is slow (~1 Hz) and smoothed twice,
+            // so the tap's speed - its pitch - drifts by a few cents. At ~7 Hz in one stage it
+            // warbled ruined rooms by 1.5-3.5 % and spread every tone into a -15 dBc skirt.
+            t.noiseRaw += (rng.bi() - t.noiseRaw) * kJitterWalk;
+            t.noise    += (t.noiseRaw - t.noise) * kJitterWalk;
+            target = std::min (t.baseDelay + t.jitter * std::max (0.0f, 1.0f + kJitterSpread * t.noise), maxDelay);
         }
         t.delayTarget = target;
         tapDelayInc[k] = (target - tapDelay[k]) * invN;

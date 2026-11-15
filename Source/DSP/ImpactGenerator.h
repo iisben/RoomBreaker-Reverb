@@ -9,7 +9,9 @@
 //
 //   Warning   before anything breaks, an overloaded wall crackles: sparse micro-
 //             fractures whose rate climbs as the load nears what the wall can take
-//             (acoustic emission). The room tells you it is about to go.
+//             (acoustic emission). The room tells you it is about to go. Like real
+//             materials (the Kaiser effect) it only does so while the load climbs past
+//             what the wall recently carried: a held note or a steady sweep is silent.
 //   Crack     a fracture runs through the material instead of happening at once: a
 //             main snap, then a burst of micro-fractures over the material's crack
 //             time, faint ones far more common than loud ones, travelling across the
@@ -146,6 +148,7 @@ private:
     const MaterialVoicing* voicing = nullptr;
     float impactAmount = 0.5f, rumbleAmount = 0.3f, roomSize = 1.0f;
     WallArray stressRatio {}, integrityNow { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    WallArray loadMemory {}, loadRise {};   // Kaiser effect: the load each wall recently carried, and how fast it is passing it
 
     std::array<Boom, kNumBooms> booms;
     std::array<Noise, kNumNoises> noises;
