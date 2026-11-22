@@ -142,52 +142,54 @@ inline const MaterialProfile& getMaterialProfile (int index) noexcept
       grains       how many micro-fractures and falling pieces it breaks into (1 = concrete)
       restitution  how far a falling piece bounces (0 = lands dead, 0.5 = steel plate)
       shatter      pieces that burst into tinkling fragments when they land (glass 1)
-      chirp        dispersion: in a thin plate high frequencies travel faster, so a crack
-                   arrives as a falling whistle (ice "pew", a buckling steel sheet's thunder)
-      chirpHiHz / chirpLoHz / chirpMs   that sweep
+      chirp        dispersion: in a thin plate high frequencies travel faster, so a crack's
+                   click arrives smeared highs-first, a "tsheww" (ice, a buckling steel sheet)
+      plateHz      how bright the crack that drives the plate is
+      plateMs      how far one crossing of the plate smears it (ms between the highs and ~400 Hz)
+      plateRing    seconds the sheet goes on shimmering as the wave crosses and re-crosses it
       creakHz / creakQ                  what a slow, overloaded wall groans through
       creakRate    stick-slip rate: a creak is a train of tiny slips, heard as a pitch
       creakGrit    0 = a clean, pitched creak (steel, wood) .. 1 = grinding (stone, concrete) */
 struct MaterialVoicing
 {
     const char* blurb;
-    float boomHz;      // start pitch of the sub "boom" a fracture makes (drops an octave)
-    float boomDecay;   // seconds (amplitude time constant)
+    float boomHz;      // where the thump of a fracture sits (the blast pulse and its rumble)
+    float boomDecay;   // seconds the low rumble after it lasts (amplitude time constant)
     float crackHz;     // centre of the crack transient's noise band
     float crackMs;     // crack transient decay
     float rubbleHz;    // centre of falling-rubble grains
 
     float spreadMs, grains, restitution, shatter;
-    float chirp, chirpHiHz, chirpLoHz, chirpMs;
+    float chirp, plateHz, plateMs, plateRing;
     float creakHz, creakQ, creakRate, creakGrit;
 };
 
 inline constexpr MaterialVoicing kMaterialVoicings[] =
 {
     //                                                                                                                 boom   decay  crack    ms    rubble
-    //   spread grains rest shatter | chirp   hi      lo     ms   | creak  Q    rate  grit
+    //   spread grains rest shatter | chirp  plateHz  ms    ring  | creak  Q    rate  grit
     { "Thick poured concrete. Cracks on loud peaks, sheds heavy chunks and rings with low, short modes.",              55.0f, 0.35f, 1800.0f, 18.0f,  700.0f,
        22.0f, 1.0f, 0.25f, 0.0f,    0.0f,     0.0f,   0.0f,   0.0f,   340.0f, 3.0f, 22.0f, 0.80f },
     { "Glazed tile over brick. Bright and smooth until a sharp transient chips it; shrugs off sustained bass.",        90.0f, 0.18f, 4200.0f,  9.0f, 2400.0f,
-        6.0f, 0.9f, 0.35f, 0.6f,    0.25f, 9000.0f, 3000.0f,  18.0f, 1400.0f, 6.0f, 45.0f, 0.50f },
+        6.0f, 0.9f, 0.35f, 0.6f,    0.25f, 9000.0f,   3.0f,  0.08f, 1400.0f, 6.0f, 45.0f, 0.50f },
     { "Thin ribbed steel. Hard to crack, but sustained sub-bass dents it into groaning, resonant panels.",             48.0f, 0.50f, 2600.0f, 25.0f, 1500.0f,
-       14.0f, 0.6f, 0.50f, 0.0f,    0.70f, 3500.0f,  250.0f, 260.0f,  180.0f, 12.0f, 28.0f, 0.20f },
+       14.0f, 0.6f, 0.50f, 0.0f,    0.70f, 6000.0f,  18.0f,  0.90f,  180.0f, 12.0f, 28.0f, 0.20f },
     { "Vast corroded steel shed. Deep dents, long metallic groans and a dark, wide tail.",                             40.0f, 0.60f, 2200.0f, 30.0f, 1200.0f,
-       18.0f, 0.7f, 0.45f, 0.0f,    0.60f, 2500.0f,  160.0f, 380.0f,  120.0f, 14.0f, 18.0f, 0.25f },
+       18.0f, 0.7f, 0.45f, 0.0f,    0.60f, 4500.0f,  24.0f,  1.20f,  120.0f, 14.0f, 18.0f, 0.25f },
     { "Enormous dark concrete. Takes huge pressure before it gives, then falls like a mountain.",                      34.0f, 0.80f, 1300.0f, 26.0f,  500.0f,
        35.0f, 1.2f, 0.20f, 0.0f,    0.0f,     0.0f,   0.0f,   0.0f,   220.0f, 2.5f, 14.0f, 0.90f },
     { "The weakest, most brittle surface. Explodes into bright shards on the first hard hit.",                        110.0f, 0.12f, 6500.0f,  7.0f, 4500.0f,
-        3.0f, 1.4f, 0.30f, 1.0f,    0.35f, 12000.0f, 4000.0f, 12.0f, 2500.0f, 8.0f, 60.0f, 0.30f },
+        3.0f, 1.4f, 0.30f, 1.0f,    0.35f, 12000.0f,  2.5f,  0.06f, 2500.0f, 8.0f, 60.0f, 0.30f },
     { "Dense limestone vaults. Grand and slightly bright; crumbles in blocks with stone-on-stone clatter.",            45.0f, 0.55f, 1500.0f, 22.0f,  800.0f,
        30.0f, 1.1f, 0.22f, 0.0f,    0.0f,     0.0f,   0.0f,   0.0f,   300.0f, 3.0f, 16.0f, 0.85f },
     { "Tile over concrete in a long tube. Clacky, mid-forward and fluttery; cracks with a hard tick.",                 62.0f, 0.30f, 3200.0f, 12.0f, 1900.0f,
-        8.0f, 0.9f, 0.35f, 0.5f,    0.15f, 7000.0f, 2500.0f,  15.0f,  900.0f, 4.0f, 35.0f, 0.60f },
+        8.0f, 0.9f, 0.35f, 0.5f,    0.15f, 7000.0f,   3.0f,  0.10f,  900.0f, 4.0f, 35.0f, 0.60f },
     { "Brittle and cold. Fractures ring and sing for seconds, with glassy, high debris.",                              75.0f, 0.25f, 5200.0f, 14.0f, 3800.0f,
-       10.0f, 0.9f, 0.30f, 0.7f,    1.00f, 7500.0f,  500.0f, 140.0f,  700.0f, 10.0f, 40.0f, 0.35f },
+       10.0f, 0.9f, 0.30f, 0.7f,    1.00f, 8000.0f,  45.0f,  0.60f,  700.0f, 10.0f, 40.0f, 0.35f },
     { "Charred wood. Warm and absorbent; creaks, splinters and crackles instead of shattering.",                       70.0f, 0.22f,  900.0f, 35.0f, 1100.0f,
        60.0f, 1.3f, 0.40f, 0.0f,    0.0f,     0.0f,   0.0f,   0.0f,   650.0f, 7.0f, 24.0f, 0.35f },
     { "Submarine steel under water pressure. Dark and muffled, with sonar-like pings and huge groans.",                38.0f, 0.70f, 1100.0f, 40.0f,  450.0f,
-       25.0f, 0.5f, 0.50f, 0.0f,    0.80f, 1800.0f,   90.0f, 600.0f,   90.0f, 16.0f, 12.0f, 0.20f },
+       25.0f, 0.5f, 0.50f, 0.0f,    0.80f, 2500.0f,  30.0f,  1.60f,   90.0f, 16.0f, 12.0f, 0.20f },
 };
 static_assert ((int) (sizeof (kMaterialVoicings) / sizeof (kMaterialVoicings[0])) == kNumMaterials,
                "Material voicing table out of sync");

@@ -193,7 +193,7 @@ const std::vector<FactoryPreset>& getFactoryPresets()
           RustedHangar, -13.0f, 0.00f, 0.30f, IndustrialTunnel, 6.0f, 1.30f, 3.5f, 0.60f, 0.35f },
 
         { "Signature", "Singing Lake Ice",
-          "Open lake ice. Every hit sends the falling 'pew' of a crack running through a frozen sheet, then the surface refreezes in a couple of seconds.",
+          "Open lake ice. Every hit sends a crack running through a frozen sheet, a bright smeared snap and a cold shimmer, then the surface refreezes in a couple of seconds.",
           CrackedIce, -4.0f, 0.05f, 0.40f, FreeField, 2.5f, 1.80f, 1.6f, 0.50f, 0.35f },
 
         { "Signature", "Controlled Demolition",
@@ -232,7 +232,7 @@ const std::vector<FactoryPreset>& getFactoryPresets()
           GlassAtrium, -16.0f, 0.05f, 0.60f, FreeField, 0.25f, 0.90f, 0.5f, 1.00f, 1.00f },
 
         { "Signature", "Glacier Groan",
-          "Ice that only long, low notes can strain. Held bass and drones make the shelf groan and pop with falling whistles over a bottomless drone.",
+          "Ice that only long, low notes can strain. Held bass and drones make the shelf groan and pop, cracks shivering through it, over a bottomless drone.",
           CrackedIce, -18.0f, 0.95f, 0.40f, Abyssal, 20.0f, 1.80f, 9.0f, 0.60f, 0.45f },
 
         { "Signature", "Distant Front Line",

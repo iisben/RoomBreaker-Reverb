@@ -23,7 +23,7 @@ Resources/fonts/               Barlow Semi Condensed, JetBrains Mono (SIL OFL, l
   UI/HousePaint.cpp            Everything the house view draws
   UI/HouseModel.h              The house's measurements, materials and outsides (private to the two above)
   DSP/                         JUCE-free, real-time-safe core (compiled and tested here)
-    DspUtils.h                 TPT one-pole / SVF, Catmull-Rom delay, allpass, xorshift RNG, fastSin / fastTan
+    DspUtils.h                 TPT one-pole / SVF, delay (Catmull-Rom tap, Lagrange read), allpass, xorshift RNG, fastSin / fastTan
     Materials.h                11 material profiles (3 core + 8 dark cinematic) + impact voicing and blurbs
     Voids.h                    7 exterior void profiles (what lies beyond a breach)
     WallState.h                Wall enum, damage-phase curves, FractureEvent
@@ -31,7 +31,7 @@ Resources/fonts/               Barlow Semi Condensed, JetBrains Mono (SIL OFL, l
     EarlyReflectionEngine.*    24-tap shoebox image-source ER with jitter + scatter
     DynamicFDN.{h,cpp}         16-line Hadamard FDN with bleed + morphing loop filters, ExteriorTank
     ModalDebrisGenerator.*     32-voice complex-resonator debris, chatter, contact rattle
-    ImpactGenerator.{h,cpp}    Fracture physics: warning crackle, crack cascade, chirp, boom, falling
+    ImpactGenerator.{h,cpp}    Fracture physics: warning crackle, crack cascade, plate, boom, falling
                                pieces + bounces, aftershocks, creak, rubble grains + rumble bed
     Telemetry.h                Triple buffer + atomics, audio → UI
     Engine.{h,cpp}             Owns everything; the processBlock body
@@ -269,10 +269,15 @@ damage, from 0.45 to 0.75.
 The modal debris gives a fracture its pitch; this layer gives it weight. Voiced per material by
 `MaterialVoicing` (boom pitch and decay, crack band and length, rubble band):
 
-* **Boom**: a sine whose pitch falls an octave (f0 → f0/2, τ ≈ 90 ms) with an exponential decay
-  and a touch of 2nd harmonic. It is mono, so the low end stays solid. Walls failing in the same
-  40 ms are one collapse: they merge into one boom (energy sum, capped) instead of stacking coherent
-  sines. That merge took the hottest preset peaks from +3.5 dB to +2.3 dB.
+* **Boom**: the pressure pulse of the impact and the rumble after it, both noise-like, never a tone.
+  The pulse is a Friedlander wave, `A·(1 − t/T)·e^(−t/T)`: a sharp push, then a longer pull, with no
+  net offset. Its spectrum is `s/(s + 1/T)²`, a broad hump peaking at `1/(2πT)`, set to 0.8 × the
+  material's `boomHz` (bigger breaks lower). Behind it, noise low-passed at 1.1 × that frequency
+  builds over 12 ms and decays over `boomDecay`: the structure settling. It is mono, so the low end
+  stays solid. Walls failing in the same 40 ms are one collapse: they merge into one rumble (energy
+  sum, capped). (It used to be a sine falling an octave in 90 ms: a synth kick under every break.
+  The rumble is set so loudness matches it within about 1 LUFS; the sub is 2–4 dB lower, which noise
+  carries better than a sine.)
 * **Warning crackle**: real structures click before they fail (acoustic emission). Once a wall's
   stress ratio passes 0.55, faint ticks start, getting denser and louder up to the breaking point
   (1.05), so a slow swell is heard straining the room before anything gives. Like real materials
@@ -282,13 +287,28 @@ The modal debris gives a fracture its pitch; this layer gives it weight. Voiced 
 * **Crack**: not one burst but a propagating crack. A fracture fires a cascade of micro-cracks over
   the material's `spreadMs` (3 ms glass … 60 ms timber), sizes drawn from a power law (many small,
   few big), each a band-passed noise click panned to the wall. Bigger breaks go deeper and longer.
-* **Dispersion chirp**: in ice, steel and glass the crack's sound runs through the sheet and arrives
-  as a falling whistle (an exponential sweep, `chirpHiHz → chirpLoHz` over `chirpMs`), the "pew" of
-  lake ice and the boom-roll of a buckling steel panel.
+* **Plate**: in ice, steel and glass the crack also runs through the sheet, and a thin plate is
+  dispersive: high frequencies travel faster, so the click arrives smeared highs-first. This is
+  modelled on the wave, not drawn as a sweep. The click (a ~1 ms noise burst, `plateHz` bright)
+  goes through a chain of first-order allpasses `(a + z⁻¹)/(1 + a·z⁻¹)` with a ≈ −0.95. Each one
+  delays DC by `(1 − a)/(1 + a)` = 39 samples at 48 kHz (a is retuned per rate, so this is the same in
+  ms) and the top by almost nothing, with the knee near 400 Hz. The chain is `plateMs` long: one
+  crossing (glass 2.5 ms, steel 18–24 ms, ice 45 ms). The sheet's reverberation is four crossing
+  paths (5.3, 7.9, 11.3, 14.9 ms), Hadamard-mixed, each adding 6 more sections and a high cut per
+  pass, so every echo is smeared further and they blur into a dense shimmer that lasts `plateRing`.
+  One loop was tried first: a comb at ~150 Hz, heard as a spring-reverb buzz. The plate is cleared
+  and stops running 50 ms after it falls below −120 dB.
+  It replaces exponential sine sweeps (up to 600 ms long, with a second sine in parallel): those
+  read as lasers, and a real room-sized sheet smears a crack over tens of milliseconds, not
+  hundreds.
 * **Falling pieces**: a break frees pieces that land after the time it takes them to fall,
   `sqrt(2h/g)` with h = 2.8 m × Size (so a big room's aftermath arrives later), then bounce: each
-  bounce comes `2·e·v/g` after the last, with e the material's `restitution`. Brittle materials
-  shatter into a spray of fragments on landing.
+  bounce comes `2·e·v/g` after the last, with e the material's `restitution`. A landing is a short
+  clatter, not one hit: a bright contact click (brighter for harder materials), the piece's body
+  a few ms later, and, as an irregular piece rocks onto another corner, one or two softer contacts
+  2–12 ms after that. Every part is band-passed noise with Q ≤ 1.5. Bounces vary their band ±10 %
+  at random (another face lands) rather than climbing in pitch. Brittle materials shatter into a
+  spray of fragments on landing.
 * **Aftershocks**: after a big break the structure keeps settling. Small follow-up cracks fire at an
   Omori-law rate, `k/(t+0.15)^1.15`, for up to 5 s.
 * **Creak**: ductile damage (plastic yield, fatigue) is a stick-slip pulse train through a resonance
@@ -303,6 +323,13 @@ The modal debris gives a fracture its pitch; this layer gives it weight. Voiced 
 Landings, bounces and aftershocks wait in a queue of up to 384 events, timed on the control grid,
 so the result is the same at any host block size.
 
+**Grain** (`FractureGranulator`, the `granular` parameter, 0 by default and in every factory
+preset): pitch-shifted grains of the impact and debris, added back onto the impact bus so the room
+hears them too. A crack onset throws a grain; above 18 % a lighter spray follows the debris while it
+rings. Pitch follows the material (glass and ice up, steel mostly down, stone down). Grains are
+Hann-windowed reads from a 16384-sample ring, started far enough behind the write head that they
+can never overtake it. At 0 nothing is scheduled and the buses are left untouched.
+
 **Reported tail.** `getTailLengthSeconds` is the room tail (1.5 × Decay + 2.25 s) plus, whenever
 Impact, Rumble or Debris is above zero, `ImpactGenerator::kMaxSettleSeconds` (7 s: aftershocks run
 5 s and rubble at its cap settles in about 6 s), or the outside space's own tail when it collects
@@ -311,11 +338,11 @@ energy (1.2 × its RT60), whichever is longer. Hosts stop processing once it has
   1.6 %, so the room's pitch flexes on big hits.
 
 The crack and rubble voices (up to 24 band-passed noise bursts) are advanced together the same way
-as the debris voices: noise generators, filters and envelopes in vector steps. The booms use a
-polynomial sine (error below −120 dB) instead of two library calls per sample. A busy collapse
-costs 47 ns per sample (it was 136).
+as the debris voices: noise generators, filters and envelopes in vector steps. A busy collapse
+costs about 47 ns per sample; a ringing plate adds up to 2 × 64 + 4 × 6 one-multiply allpass
+sections, and nothing once it has rung out.
 
-Impact scales boom, crack, chirp, warning and shock; Rumble scales the rubble and the falling
+Impact scales boom, crack, plate, warning and shock; Rumble scales the rubble and the falling
 pieces. DETONATE (`StressTracker::detonate`) removes a material-scaled chunk from every wall and
 emits a full-magnitude event per wall. Like a real demolition the charges fire in a random order,
 30–110 ms apart, so it is heard as a rolling chain of bangs running into the collapse.
@@ -385,6 +412,7 @@ the room's own pre-delay. With Drive at 100 % on a 7 kHz sine, energy off the ha
 | `mix` | Dry / Wet | 0–100 %, 35 % | equal-power crossfade |
 | `impact` *(v2)* | Impact | 0–100 %, 50 % | boom + crack level, shock depth |
 | `rumble` *(v2)* | Rumble | 0–100 %, 30 % | rubble grains + rumble bed |
+| `granular` *(v3)* | Granular ("Grain") | 0–100 %, 0 | pitch-shifted grains of the breaking (`FractureGranulator`) |
 | `detonate` *(v2)* | Detonate | bool, momentary, rising edge | `Engine::detonate()` |
 | `stresssrc` *(v2)* | Stress Source | Input / Sidechain / Input + Sidechain | what feeds `StressTracker` |
 | `predelay` *(v2)* | Pre-Delay | 0–250 ms, 0 | delays room input and stress source |
@@ -470,7 +498,7 @@ source or bypass, so browsing never jumps the level or the CPU load.
 | 35 | Signature · High Vault Aftermath | hits, toms | Double-height vault: the stone a hit shakes loose lands up to a second later, on its own beat |
 | 36 | Signature · Tile Snare Exciter | snares, claps | Accents crack tiles and ghost notes don't; heals in 0.25 s, so each accent gets a new crack |
 | 37 | Signature · Riser Tension | risers, swells, drops | Never breaks on a swell but crackles louder and faster under it; the drop's first hit breaks it |
-| 38 | Signature · Singing Lake Ice | percussion, FX | Every hit sends a falling crack whistle through lake ice, refreezing in ~2.5 s |
+| 38 | Signature · Singing Lake Ice | percussion, FX | Every hit sends a crack shimmering through lake ice, refreezing in ~2.5 s |
 | 39 | Signature · Controlled Demolition | anything; press Detonate | Music can't break it; Detonate fires a rolling chain of charges, collapse and aftershocks |
 | 40 | Signature · Hearth Crackle | acoustic, keys, vocals | Charred timber that splinters and re-sets on every note: the reverb crackles like a fire |
 | 41 | Signature · Breath Abyss | spoken word, vocals | A near-gone hull, fully ducked: the abyss rises only in the pauses |
@@ -479,7 +507,7 @@ source or bypass, so browsing never jumps the level or the CPU load.
 | 44 | Signature · Rising From Rubble | intros, pads | Starts as rubble and rebuilds while the music is quiet, closing into a bright room |
 | 45 | Signature · Booth to Stadium | vocals, drums | Dead booth at verse level; chorus hits breach it and a stadium blooms through, then seals |
 | 46 | Signature · Breakage Foley Printer | drum loops (print it) | 100 % wet glass that breaks on every hit and re-glazes: a glass layer locked to the groove |
-| 47 | Signature · Glacier Groan | bass, drones | Only long low notes strain it: groans, pops and falling whistles over a bottomless drone |
+| 47 | Signature · Glacier Groan | bass, drones | Only long low notes strain it: groans, pops and cracks shivering through the ice over a bottomless drone |
 | 48 | Signature · Distant Front Line | drums, FX | Your sound a kilometre away: 250 ms of travel, highs lost, hits answered by distant blasts |
 
 Audition renders of every preset (the same drums → bass → impact → tail script) are written to
@@ -810,8 +838,10 @@ Material personalities on the same script, with permadeath:
 * SIMD is left to the compiler: the hot loops are written as element-wise passes over arrays (tank
   filters, tap mixes, debris and impact voices). Hand-written intrinsics could still gain on the 64
   scattered delay reads per sample in the tank, which is now its largest cost.
-* In the tank, Catmull-Rom reads lose up to 1 dB at 12 kHz per pass at 48 kHz when a line sits
-  between samples. The materials' own damping is several times larger, and the loss vanishes at
-  2x/4x, so it is left alone.
+* The tank reads its lines with an 8-tap, 32-phase 7th-order Lagrange interpolator
+  (`DelayLine::readSinc`): passive (|H| ≤ 1 at every frequency and fraction, adjacent phases
+  blended), exactly unity at DC, 0.2 dB down at 12 kHz worst case. A windowed-sinc table tried
+  before it was 0.9985 at DC: 0.013 dB lost per pass, which faded Freeze by 33 dB in two minutes
+  and cut a 20 s decay by about 10 %.
 * Possible additions: preset morphing between materials, MIDI-triggered demolition (DETONATE is
   already automatable), A/B compare and undo in the header, a "lock Mix while browsing" option.

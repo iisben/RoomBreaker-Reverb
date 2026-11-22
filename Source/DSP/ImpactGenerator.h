@@ -9,35 +9,39 @@
 //
 //   Warning   before anything breaks, an overloaded wall crackles: sparse micro-
 //             fractures whose rate climbs as the load nears what the wall can take
-//             (acoustic emission). Each tick is a short hit — the crack starting, then
-//             arresting a fraction of a millisecond later — and ice and steel leave a
-//             faint ring. Like real materials (the Kaiser effect) it only does so while
-//             the load climbs past what the wall recently carried: a held note is silent.
+//             (acoustic emission). Each tick is the crack starting, then arresting a
+//             fraction of a millisecond later. Like real materials (the Kaiser effect)
+//             it only does so while the load climbs past what the wall recently
+//             carried: a held note or a steady sweep is silent.
 //   Crack     a fracture runs through the material instead of happening at once: a
 //             main snap, then micro-fractures over the material's crack time, faint
 //             ones far more common than loud ones, travelling across the stereo field.
-//             The snap is a few tenths of a millisecond of noise into a resonant band;
-//             the band rings after the hit. Stone keeps grit in that tail. Ice, glass
-//             and steel ring cleaner and add an inharmonic partial. Big breaks snap
-//             lower and run longer; small ones tick.
-//   Whistle   thin plates (ice, steel, glass) are dispersive: the crack arrives as a
-//             falling sweep (the "pew" of lake ice, the thunder of a buckling sheet),
-//             with air in the tone and a second partial, and it settles into a ring
-//             at the bottom of the sweep instead of staying a pure sine.
-//   Boom      the body of the hit: a falling sub sine plus a broadband thud. Bigger
-//             collapses go deeper. Mono, so the low end stays solid.
+//             Big breaks snap lower and run longer, with a crunch under them; small
+//             ones tick. Every one is a broadband noise hit: the pitched ringing of the
+//             material is the modal debris engine's job, so nothing here is a tone.
+//   Plate     thin plates (ice, steel, glass) are dispersive: high frequencies travel
+//             faster, so the crack's click arrives smeared highs-first. Modelled as the
+//             wave itself: the click runs through a chain of allpass sections (the
+//             dispersion of one crossing) inside a loop (the sheet's edges), so every
+//             crossing smears it further and the echoes blur into a metallic shimmer.
+//             There is no oscillator, so it cannot turn into a sine sweep.
+//   Boom      the body of the hit: the pressure pulse of the impact (a Friedlander
+//             wave: a sharp push, then a longer pull, no net offset) and the low rumble
+//             of the structure settling after it. Noise, not a tone, so a collapse
+//             thumps instead of playing a falling note. Mono, so the low end stays solid.
 //   Debris    pieces come loose, fall and land: each one has a size (many small, a few
-//             big), ticks as it lets go, is silent for its fall time, then clicks and
-//             thuds. Height comes from Size and which wall let go; bounces follow
-//             2·e·v/g and the material's restitution. Glass and ice burst; steel clangs;
-//             stone thuds. Landings feed the rubble.
+//             big), drops from a height set by Size and the wall it came from, and lands
+//             after its fall time. An irregular piece does not land on one point: it
+//             clicks, its body thuds a moment later, and it rocks onto another corner, so
+//             a landing is a short clatter. Bounces follow 2·e·v/g and the material's
+//             restitution. Glass and ice burst into fragments. Landings feed the rubble.
 //   Settling  a big break is followed by aftershocks: smaller cracks whose rate falls
 //             off as 1/t over a few seconds (Omori's law), as the structure re-seats.
 //   Creak     slow, ductile failure: a stick-slip pulse train through the material's
 //             resonance, a pitched creak in steel and wood, a grind in stone.
 //   Rubble    the lingering bed and trickle of grains, driven by "rubble energy".
 //
-// Impact scales the warning, crack, whistle, boom and settling; Rumble scales the
+// Impact scales the warning, crack, plate, boom and settling; Rumble scales the
 // falling debris and rubble; creaks take both. Every voice owns its RNG and every
 // scheduled sound is timed from the control grid, so the output does not depend on
 // how the host slices audio.
@@ -53,10 +57,9 @@ class ImpactGenerator
 public:
     static constexpr int kNumBooms     = 4;
     static constexpr int kNumNoises    = 64;   // cracks, micro-fractures, landings, grains share one pool
-    static constexpr int kNumChirps    = 8;
     static constexpr int kNumCreaks    = 4;
     static constexpr int kNumSequences = 6;    // aftershock sequences
-    static constexpr int kQueueSize    = 512;  // releases, landings and bounces still in the air
+    static constexpr int kQueueSize    = 384;  // landings and bounces still in the air
     /** Longest a break keeps sounding after the input stops: aftershocks run 5 s, and rubble at
         its cap settles in about 6 s. The plugin adds this to the tail it reports to the host. */
     static constexpr float kMaxSettleSeconds = 7.0f;
@@ -64,7 +67,7 @@ public:
     void prepare (double sampleRate);
     void reset();
 
-    void setVoicing (const MaterialVoicing* v) noexcept { voicing = v; }
+    void setVoicing (const MaterialVoicing* v) noexcept { if (v != voicing) { voicing = v; tunePlate(); } }
     void setAmounts (float impact, float rumble) noexcept { impactAmount = clamp01 (impact); rumbleAmount = clamp01 (rumble); }
     /** Room Size (1 = default): sets how far pieces fall. */
     void setRoomSize (float s) noexcept { roomSize = std::clamp (s, 0.3f, 2.5f); }
@@ -84,14 +87,15 @@ public:
     int piecesInTheAir() const noexcept { return numPending; }
 
 private:
-    struct Boom
+    struct Boom                           // blast pulse + the rumble after it
     {
         bool  active = false;
         int   startDelay = 0;
-        float phase = 0.0f;
-        float freqEnd = 40.0f, freqSpan = 40.0f, freqDecay = 0.999f; // f = end + span · decay^n
-        float amp = 0.0f, ampDecay = 0.999f;
+        float pulse = 0.0f, pulseT = 0.0f, pulseE = 1.0f, pulseR = 0.999f, pulseStep = 0.0f;   // A·(1 - t/T)·e^(-t/T)
+        float amp = 0.0f, ampDecay = 0.999f, rumbleGain = 1.0f;   // rumble level, its decay, and noise → level
         float attack = 0.0f, attackInc = 0.01f;
+        SvfTpt rumble;
+        Rng   rng { 1u };
         int   age = 0;                    // samples since it started sounding
     };
 
@@ -101,22 +105,39 @@ private:
         int   startDelay = 0;
         SvfTpt band;
         float amp = 0.0f, decay = 0.99f;
-        float burst = 0.0f;               // samples of full excitation still to come
-        float tail = 0.0f;                // excitation left once the burst is over (0 = ring only)
         float panL = 0.707f, panR = 0.707f;
         Rng   rng { 1u };
     };
 
-    struct Chirp                          // a falling sweep: tone, a partial, and air
+    /** A thin sheet. The crack's click runs through a chain of first-order allpasses with the
+        pole near DC (low frequencies delayed most): that is one crossing, the direct sound, kept
+        left/right. The sheet's reverberation is four crossing paths of different lengths mixed by
+        a Hadamard matrix, each adding its own dispersion and losing highs on every pass, so the
+        echoes smear further each time and blur into a dense metallic shimmer instead of a comb. */
+    struct Plate
     {
-        bool  active = false;
-        int   startDelay = 0;
-        float phase = 0.0f, phase2 = 0.0f, freq = 1000.0f, freqMul = 1.0f, freqMin = 100.0f;
-        float partial = 1.6f, partialGain = 0.3f, noiseMix = 0.3f;
-        float lp1 = 0.0f, lp2 = 0.0f;     // noise band that tracks the sweep
-        float amp = 0.0f, ampDecay = 0.999f, attack = 0.0f, attackInc = 0.01f;
-        float panL = 0.707f, panR = 0.707f;
-        Rng   rng { 1u };
+        static constexpr int kMaxStages = 64;     // direct chain
+        static constexpr int kPaths     = 4;
+        static constexpr int kPathStages = 6;     // dispersion added per crossing
+        static constexpr int kExcites   = 16;
+        struct Excite
+        {
+            bool  active = false;
+            int   delay = 0, left = 0;
+            float amp = 0.0f, decay = 1.0f, panL = 0.707f, panR = 0.707f;
+            Rng   rng { 1u };
+        };
+        std::array<Excite, kExcites> excites;
+        std::array<float, kMaxStages> xL {}, yL {}, xR {}, yR {};
+        std::array<std::array<float, kPathStages>, kPaths> px {}, py {};
+        std::array<DelayLine, kPaths> paths;
+        std::array<OnePoleTpt, kPaths> damp;
+        std::array<int, kPaths> length {};
+        std::array<float, kPaths> gain {};
+        OnePoleTpt brightL, brightR;
+        float a = -0.95f;
+        int   stages = 0, quiet = 0;
+        bool  idle = true;
     };
 
     struct Creak                          // stick-slip pulses through a resonance
@@ -130,10 +151,9 @@ private:
         Rng   rng { 1u };
     };
 
-    struct Pending                        // a piece in the air, a bounce, or the tick as it lets go
+    struct Pending                        // a piece in the air, or a bounce still to come
     {
         int   due = 0;                    // samples from the start of the current tick
-        int   kind = 0;                   // 0 = landing or bounce, 1 = the release tick
         float hz = 1000.0f, q = 1.0f, amp = 0.0f, decayMs = 5.0f, pan = 0.0f;
         float thump = 0.0f;               // heavy pieces thud the floor
         float rubble = 0.0f;              // what the landing adds to the rubble energy
@@ -149,16 +169,15 @@ private:
 
     Noise& allocateNoise() noexcept;
     void startBoom (int wall, float magnitude, float amp, int offset) noexcept;
-    /** burstMs is how long noise drives the band. After that the band rings, with `tail`
-        (0..1) of the drive left in the tail so stone stays gritty and ice does not. */
-    void startNoise (float hz, float q, float amp, float decayMs, int delay, float pan,
-                     float burstMs, float tail = 0.0f) noexcept;
-    void startChirp (float hiHz, float loHz, float ms, float amp, int delay, float pan) noexcept;
+    void startNoise (float hz, float q, float amp, float decayMs, int delay, float pan) noexcept;
+    void excitePlate (float amp, float ms, int delay, float pan) noexcept;
+    void tunePlate() noexcept;
+    void clearPlate() noexcept;
+    void processPlate (float* outL, float* outR, int numSamples) noexcept;
     void startCreak (int wall, float magnitude, int delay) noexcept;
     void crack (int wall, float magnitude, int offset, float level) noexcept;
     void dropPieces (int wall, float magnitude, int offset) noexcept;
     void schedule (const Pending&) noexcept;
-    void letGo (const Pending&, int offset) noexcept;
     void land (const Pending&, int offset) noexcept;
 
     float fs = 48000.0f;
@@ -169,7 +188,7 @@ private:
 
     std::array<Boom, kNumBooms> booms;
     std::array<Noise, kNumNoises> noises;
-    std::array<Chirp, kNumChirps> chirps;
+    Plate plate;
     std::array<Creak, kNumCreaks> creaks;
     std::array<Sequence, kNumSequences> sequences;
     std::array<Pending, kQueueSize> pending;

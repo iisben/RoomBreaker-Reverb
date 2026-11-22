@@ -489,6 +489,57 @@ int main (int argc, char** argv)
     }
 
     //--------------------------------------------------------------------------
+    std::printf ("\n== 10b. The tank's fractional read is lossless at DC and never boosts ==\n");
+    {
+        // Every row of the table, and every blend of two neighbours (what a moving delay reads),
+        // must sum to 1 and have |H| <= 1 everywhere: the frozen tank circulates through it forever.
+        double worstDc = 0.0, worstPeak = 0.0;
+        auto row = [] (int p, int k) { return p < kSincPhases ? (double) kSincTable[p][k] : (k == 4 ? 1.0 : 0.0); };
+        for (int p = 0; p < kSincPhases; ++p)
+            for (double t : { 0.0, 0.5 })
+            {
+                double h[kSincTaps], dc = 0.0;
+                for (int k = 0; k < kSincTaps; ++k) { h[k] = (1.0 - t) * row (p, k) + t * row (p + 1, k); dc += h[k]; }
+                worstDc = std::max (worstDc, std::abs (dc - 1.0));
+                for (int f = 0; f <= 512; ++f)
+                {
+                    const double w = M_PI * f / 512.0;
+                    double re = 0.0, im = 0.0;
+                    for (int k = 0; k < kSincTaps; ++k) { re += h[k] * std::cos (w * k); im -= h[k] * std::sin (w * k); }
+                    worstPeak = std::max (worstPeak, std::sqrt (re * re + im * im));
+                }
+            }
+        std::printf ("    worst |DC - 1| %.2e, worst |H| %.7f\n", worstDc, worstPeak);
+        check (worstDc < 1.0e-6, "unity at DC for every fraction");
+        check (worstPeak < 1.0 + 1.0e-6, "|H| <= 1 at every frequency and fraction");
+
+        // Freeze holds what was in the room. (A table 0.15 % short at DC faded it 7 dB in 30 s.)
+        Engine e;
+        e.prepare (48000.0);
+        EngineParams p; p.mix = 1.0f; p.impact = p.rumble = p.debrisLevel = 0.0f; p.yieldDb = 0.0f; p.decaySeconds = 3.0f;
+        e.setParams (p);
+        e.setMixDry (false);
+        Rng noise (3);
+        std::vector<float> L (256), R (256);
+        double early = 0.0, late = 0.0;
+        for (int pos = 0; pos < 48000 * 34; pos += 256)
+        {
+            if (pos >= 72000 && ! p.freeze) { p.freeze = true; e.setParams (p); }
+            for (int i = 0; i < 256; ++i) L[(size_t) i] = R[(size_t) i] = pos < 48000 ? 0.1f * noise.bi() : 0.0f;
+            e.process (L.data(), R.data(), 256, nullptr, nullptr);
+            for (int i = 0; i < 256; ++i)
+            {
+                const double s2 = (double) L[(size_t) i] * L[(size_t) i];
+                if (pos >= 48000 * 3 && pos < 48000 * 4) early += s2;
+                if (pos >= 48000 * 33) late += s2;
+            }
+        }
+        const double drop = 10.0 * std::log10 (early / std::max (late, 1.0e-30));
+        std::printf ("    frozen level, second 3 -> second 33: %.2f dB\n", -drop);
+        check (std::abs (drop) < 1.5, "Freeze holds the tail for 30 s (within 1.5 dB)");
+    }
+
+    //--------------------------------------------------------------------------
     std::printf ("\n== 11. Automation: no clicks when controls jump ==\n");
     {
         // A low sine through a room that never breaks: the wet signal is smooth, so any click is ours.
