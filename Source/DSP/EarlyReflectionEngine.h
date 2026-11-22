@@ -80,6 +80,7 @@ private:
     alignas (16) float bounceS[4] {};
     float bounceG = 0.0f, bounceGInc = 0.0f, bounceGTarget = 0.0f;   // shelf corner (as the one-pole's G), ramped
     float bounceHf = 1.0f, bounceHfInc = 0.0f, bounceHfTarget = 1.0f;  // shelf depth, ramped
+    float diffuserGain = 0.45f, diffuserGainInc = 0.0f, diffuserGainTarget = 0.45f;
 
     // what the gains were last computed from
     WallArray gainIntegrity {};

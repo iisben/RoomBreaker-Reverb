@@ -129,7 +129,52 @@ struct SvfTpt
 };
 
 //==============================================================================
-/** Power-of-two circular delay with Catmull-Rom fractional reads.
+// 8-tap windowed-sinc fractional read, 32 phases. A first-order Thiran allpass is
+// unity magnitude, but its coefficient wraps once per sample of delay and that wrap
+// clicks under this tank's modulation. The kernel below is stateless, scaled so
+// |H| <= 1 (float32), and loses about 0.06 dB at 12 kHz where Catmull-Rom loses 1.1 dB.
+// Tap 3 is the integer sample at phase 0. h[k] weights x[n - i + 3 - k].
+// Adjacent phases are interpolated, including the wrap onto the next sample,
+// so a moving delay does not stair-step once per 1/32 of a sample.
+inline constexpr int kSincPhases = 32;
+inline constexpr int kSincTaps = 8;
+inline constexpr float kSincTable[kSincPhases][kSincTaps] = {
+    { 0.00000000f, -0.00000000f, 0.00000000f, 0.99850398f, 0.00000000f, -0.00000000f, 0.00000000f, -0.00000000f },
+    { -0.00023014f, 0.00362029f, -0.01943604f, 0.99047846f, 0.03195092f, -0.01018078f, 0.00247704f, -0.00017577f },
+    { -0.00045065f, 0.00705377f, -0.03732081f, 0.97976791f, 0.06531786f, -0.02046625f, 0.00495265f, -0.00035051f },
+    { -0.00066005f, 0.01028098f, -0.05364213f, 0.96644265f, 0.09997683f, -0.03077827f, 0.00740673f, -0.00052276f },
+    { -0.00085696f, 0.01328474f, -0.06839495f, 0.95058257f, 0.13579751f, -0.04103697f, 0.00981916f, -0.00069110f },
+    { -0.00104017f, 0.01605010f, -0.08158115f, 0.93227670f, 0.17264383f, -0.05116106f, 0.01216986f, -0.00085413f },
+    { -0.00120859f, 0.01856438f, -0.09320936f, 0.91162277f, 0.21037448f, -0.06106820f, 0.01443896f, -0.00101046f },
+    { -0.00136126f, 0.02081709f, -0.10329478f, 0.88872670f, 0.24884348f, -0.07067538f, 0.01660689f, -0.00115876f },
+    { -0.00149738f, 0.02279994f, -0.11185895f, 0.86370215f, 0.28790072f, -0.07989925f, 0.01865449f, -0.00129773f },
+    { -0.00161629f, 0.02450676f, -0.11892949f, 0.83666994f, 0.32739258f, -0.08865653f, 0.02056315f, -0.00142614f },
+    { -0.00171746f, 0.02593352f, -0.12453989f, 0.80775756f, 0.36716253f, -0.09686436f, 0.02231489f, -0.00154281f },
+    { -0.00180052f, 0.02707819f, -0.12872921f, 0.77709863f, 0.40705167f, -0.10444068f, 0.02389252f, -0.00164663f },
+    { -0.00186521f, 0.02794076f, -0.13154181f, 0.74483230f, 0.44689938f, -0.11130460f, 0.02527974f, -0.00173658f },
+    { -0.00191144f, 0.02852312f, -0.13302703f, 0.71110268f, 0.48654394f, -0.11737679f, 0.02646121f, -0.00181172f },
+    { -0.00193924f, 0.02882901f, -0.13323891f, 0.67605829f, 0.52582312f, -0.12257980f, 0.02742271f, -0.00187120f },
+    { -0.00194877f, 0.02886393f, -0.13223587f, 0.63985142f, 0.56457479f, -0.12683849f, 0.02815124f, -0.00191428f },
+    { -0.00194031f, 0.02863507f, -0.13008034f, 0.60263757f, 0.60263757f, -0.13008034f, 0.02863507f, -0.00194031f },
+    { -0.00191428f, 0.02815124f, -0.12683849f, 0.56457479f, 0.63985142f, -0.13223587f, 0.02886393f, -0.00194877f },
+    { -0.00187120f, 0.02742271f, -0.12257980f, 0.52582312f, 0.67605829f, -0.13323891f, 0.02882901f, -0.00193924f },
+    { -0.00181172f, 0.02646121f, -0.11737679f, 0.48654394f, 0.71110268f, -0.13302703f, 0.02852312f, -0.00191144f },
+    { -0.00173658f, 0.02527974f, -0.11130460f, 0.44689938f, 0.74483230f, -0.13154181f, 0.02794076f, -0.00186521f },
+    { -0.00164663f, 0.02389252f, -0.10444068f, 0.40705167f, 0.77709863f, -0.12872921f, 0.02707819f, -0.00180052f },
+    { -0.00154281f, 0.02231489f, -0.09686436f, 0.36716253f, 0.80775756f, -0.12453989f, 0.02593352f, -0.00171746f },
+    { -0.00142614f, 0.02056315f, -0.08865653f, 0.32739258f, 0.83666994f, -0.11892949f, 0.02450676f, -0.00161629f },
+    { -0.00129773f, 0.01865449f, -0.07989925f, 0.28790072f, 0.86370215f, -0.11185895f, 0.02279994f, -0.00149738f },
+    { -0.00115876f, 0.01660689f, -0.07067538f, 0.24884348f, 0.88872670f, -0.10329478f, 0.02081709f, -0.00136126f },
+    { -0.00101046f, 0.01443896f, -0.06106820f, 0.21037448f, 0.91162277f, -0.09320936f, 0.01856438f, -0.00120859f },
+    { -0.00085413f, 0.01216986f, -0.05116106f, 0.17264383f, 0.93227670f, -0.08158115f, 0.01605010f, -0.00104017f },
+    { -0.00069110f, 0.00981916f, -0.04103697f, 0.13579751f, 0.95058257f, -0.06839495f, 0.01328474f, -0.00085696f },
+    { -0.00052276f, 0.00740673f, -0.03077827f, 0.09997683f, 0.96644265f, -0.05364213f, 0.01028098f, -0.00066005f },
+    { -0.00035051f, 0.00495265f, -0.02046625f, 0.06531786f, 0.97976791f, -0.03732081f, 0.00705377f, -0.00045065f },
+    { -0.00017577f, 0.00247704f, -0.01018078f, 0.03195092f, 0.99047846f, -0.01943604f, 0.00362029f, -0.00023014f },
+};
+
+//==============================================================================
+/** Power-of-two circular delay. tap() is Catmull-Rom; readSinc() is the flat fractional read.
     Convention: read taps for x[n] BEFORE pushing x[n]; tap(d) returns x[n - d]. */
 class DelayLine
 {
@@ -144,9 +189,47 @@ public:
         writePos = 0;
     }
 
-    void reset() noexcept { std::fill (buffer.begin(), buffer.end(), 0.0f); writePos = 0; }
+    void reset() noexcept { clear(); writePos = 0; }
+    void clear() noexcept { std::fill (buffer.begin(), buffer.end(), 0.0f); }
     void push (float x) noexcept { buffer[writePos] = x; writePos = (writePos + 1u) & mask; }
     float maxDelay() const noexcept { return (float) mask - 3.0f; }
+
+    /** Fractional read with |H| <= 1. Same delay convention as tap(). */
+    float readSinc (float d) const noexcept
+    {
+        const float hi = std::max (4.0f, maxDelay() - 4.0f);
+        d = std::clamp (d, 4.0f, hi);
+        const int i = (int) d;
+        const float frac = d - (float) i;
+        const float phaseF = frac * (float) kSincPhases;
+        int phase = (int) phaseF;
+        if (phase >= kSincPhases) phase = kSincPhases - 1;
+        if (phase < 0) phase = 0;
+        const float a = sincAt (i, phase);
+        const float t = phaseF - (float) phase;
+        if (t <= 1.0e-6f)
+            return a;
+        // The next table row past the last one is the integer kernel, one sample later.
+        const float b = phase + 1 < kSincPhases ? sincAt (i, phase + 1) : sincAt (i + 1, 0);
+        return a + t * (b - a);
+    }
+
+private:
+    float sincAt (int delay, int phase) const noexcept
+    {
+        const float* h = kSincTable[phase];
+        const uint32_t idx = writePos - (uint32_t) delay;
+        return h[0] * buffer[(idx + 3u) & mask]
+             + h[1] * buffer[(idx + 2u) & mask]
+             + h[2] * buffer[(idx + 1u) & mask]
+             + h[3] * buffer[idx & mask]
+             + h[4] * buffer[(idx - 1u) & mask]
+             + h[5] * buffer[(idx - 2u) & mask]
+             + h[6] * buffer[(idx - 3u) & mask]
+             + h[7] * buffer[(idx - 4u) & mask];
+    }
+
+public:
 
     float tapInt (int d) const noexcept { return buffer[(writePos - (uint32_t) d) & mask]; }
 

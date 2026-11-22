@@ -85,6 +85,10 @@ void EarlyReflectionEngine::reset()
     bounceHf = bounceHfTarget = 1.0f;
     bounceG = bounceGTarget = 0.0f;
     bounceHfInc = bounceGInc = 0.0f;
+    diffuserGain = diffuserGainTarget = 0.45f;
+    diffuserGainInc = 0.0f;
+    for (auto& d : diffuserL) d.setGain (0.45f);
+    for (auto& d : diffuserR) d.setGain (0.45f);
 }
 
 void EarlyReflectionEngine::buildTopology() noexcept
@@ -189,10 +193,10 @@ void EarlyReflectionEngine::updateControl (const WallArray& I, const MaterialPro
                 gainInc[c][k] = (gainTarget[c][k] - gain[c][k]) * invN;
         }
 
-        // Shattered surfaces smear harder.
-        const float diffusion = 0.45f + 0.3f * meanDamage;
-        for (auto& d : diffuserL) d.setGain (diffusion);
-        for (auto& d : diffuserR) d.setGain (diffusion);
+        // Shattered surfaces smear harder. The gain ramps with the tap gains; stepping it
+        // shifts every reflection at once.
+        diffuserGainTarget = 0.45f + 0.3f * meanDamage;
+        diffuserGainInc = (diffuserGainTarget - diffuserGain) * invN;
 
         // What one bounce takes off the top: the material's shelf, half as deep as 50 ms in the tank.
         // Corner and depth are both ramped: stepping a filter's corner shifts the phase of everything
@@ -215,6 +219,10 @@ void EarlyReflectionEngine::updateControl (const WallArray& I, const MaterialPro
         bounceHf = bounceHfTarget;
         bounceG = bounceGTarget;
         bounceHfInc = bounceGInc = 0.0f;
+        diffuserGain = diffuserGainTarget;
+        diffuserGainInc = 0.0f;
+        for (auto& d : diffuserL) d.setGain (diffuserGain);
+        for (auto& d : diffuserR) d.setGain (diffuserGain);
         gainsSettled = true;
     }
 
@@ -330,9 +338,12 @@ void EarlyReflectionEngine::process (const float* in, float* outL, float* outR, 
             first[j] += low + hf * (second[j] - low);
         }
 
+        diffuserGain += diffuserGainInc;
         float dL = first[2], dR = first[3];
         if (diffuseHold > 0)
         {
+            for (auto& ap : diffuserL) ap.setGain (diffuserGain);
+            for (auto& ap : diffuserR) ap.setGain (diffuserGain);
             for (auto& ap : diffuserL) dL = ap.process (dL);
             for (auto& ap : diffuserR) dR = ap.process (dR);
         }

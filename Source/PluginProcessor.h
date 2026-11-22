@@ -88,14 +88,15 @@ private:
     rb::ParameterCache params;
     std::array<rb::dsp::Engine, rb::kNumOversampling> engines;
     std::array<std::unique_ptr<juce::dsp::Oversampling<float>>, rb::kNumOversampling> oversamplers; // [0] unused
-    int activeIndex = 0, fadingIndex = -1, fadePos = 0, fadeLength = 1;
+    std::atomic<int> activeIndex { 0 };
+    int fadingIndex = -1, fadePos = 0, fadeLength = 1;
 
     juce::AudioBuffer<float> dryBuf, wetBuf, fadeBuf, silenceBuf, keyBuf, keyUpBuf;
     float lastKeyL = 0.0f, lastKeyR = 0.0f;
     int maxChunk = 512;
     double hostRate = 48000.0;
 
-    juce::SmoothedValue<float> inGain, outGain, dryGain, bypassMix;
+    juce::SmoothedValue<float> inGain, outGain, mixAngle, bypassMix;
     juce::AudioBuffer<float> engineInBuf;
     std::vector<float> bypassRamp;
     std::array<float, 2> inMs {}, outMs {};

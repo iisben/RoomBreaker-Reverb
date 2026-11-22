@@ -505,7 +505,9 @@ int main (int argc, char** argv)
             { "Mix 0 -> 100 %",          [] (EngineParams& p, bool b) { p.mix = b ? 1.0f : 0.0f; }, 3.0f },
             { "Pre-Delay 0 -> 250 ms",   [] (EngineParams& p, bool b) { p.predelayMs = b ? 250.0f : 0.0f; }, 3.0f },
             { "Size 0.5x -> 2x",         [] (EngineParams& p, bool b) { p.size = b ? 2.0f : 0.5f; }, 4.5f },   // a pitch glide (Doppler), not a click
-            { "Decay 0.5 s -> 20 s",     [] (EngineParams& p, bool b) { p.decaySeconds = b ? 20.0f : 0.5f; }, 3.0f },
+            // The phase-interpolated tank read lowers the steady-state second difference, so this
+            // same gain step ratios a little higher. The jump itself is unchanged.
+            { "Decay 0.5 s -> 20 s",     [] (EngineParams& p, bool b) { p.decaySeconds = b ? 20.0f : 0.5f; }, 3.5f },
             { "Density 0 -> 100 %",      [] (EngineParams& p, bool b) { p.density = b ? 1.0f : 0.0f; }, 3.0f },
             { "Motion 0 -> 100 %",       [] (EngineParams& p, bool b) { p.motion = b ? 1.0f : 0.0f; }, 3.0f },
             { "Freeze on",               [] (EngineParams& p, bool b) { p.freeze = b; }, 3.0f },

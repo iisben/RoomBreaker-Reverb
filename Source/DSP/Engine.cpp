@@ -64,6 +64,7 @@ void Engine::prepare (double newSampleRate)
     publishInterval = std::max (controlBlock, (int) (fs / kTelemetryHz));
 
     reset();
+    applyPendingRestore();   // audio is suspended: land a waiting recall before the next save
     prepared = true;
 }
 
@@ -103,7 +104,8 @@ void Engine::reset()
     duckGainShown = 1.0f;
     detonateRequested = false;
 
-    mixSm = clamp01 (params.mix);
+    mixTarget = mixSm = clamp01 (params.mix);
+    mixCoeff = std::exp (-1.0f / (0.03f * fs));
     wetMix = std::sin (mixSm * kHalfPi);
     dryMix = std::cos (mixSm * kHalfPi);
     wetMixInc = dryMixInc = 0.0f;
@@ -112,7 +114,10 @@ void Engine::reset()
     flashAccumulator.fill (0.0f);
     samplesSincePublish = 0;
     tickPosition = 0;
-    for (auto& a : publishedIntegrity) a.store (1.0f, std::memory_order_relaxed);
+    // A recall already queued (sample-rate change, session load, oversampling handoff) must
+    // survive this wipe. Publishing 1 here is what made a save during the handoff forget the room.
+    if (! restorePending.load (std::memory_order_acquire))
+        for (auto& a : publishedIntegrity) a.store (1.0f, std::memory_order_relaxed);
 }
 
 void Engine::resetStructure() noexcept
@@ -165,6 +170,12 @@ void Engine::applyPendingRestore() noexcept
 WallArray Engine::currentIntegrity() const noexcept
 {
     WallArray I {};
+    if (restorePending.load (std::memory_order_acquire))
+    {
+        for (int w = 0; w < kNumWalls; ++w)
+            I[(size_t) w] = pendingRestore[(size_t) w].load (std::memory_order_relaxed);
+        return I;
+    }
     for (int w = 0; w < kNumWalls; ++w)
         I[(size_t) w] = publishedIntegrity[(size_t) w].load (std::memory_order_relaxed);
     return I;
@@ -294,11 +305,12 @@ void Engine::controlTick() noexcept
         highCutR.set (std::min (highCutSm, 0.45f * fs), 0.7071f, fs);
     }
 
-    // Mix: glide the amount, take the equal-power gains once per tick, ramp them per sample.
-    mixSm = clamp01 (params.mix) + std::exp (-dt / 0.03f) * (mixSm - clamp01 (params.mix));
-    if (std::abs (mixSm - clamp01 (params.mix)) < 1.0e-5f) mixSm = clamp01 (params.mix);
-    wetMixInc = (std::sin (mixSm * kHalfPi) - wetMix) * invN;
-    dryMixInc = (std::cos (mixSm * kHalfPi) - dryMix) * invN;
+    // Mix is applied per sample (sin/cos of one smoothed angle). Ramping sin and cos
+    // independently dips about 2 dB on a full throw. The plugin smooths the angle itself
+    // and asks for wet only; this path is the standalone / offline equal-power mix.
+    mixTarget = clamp01 (params.mix);
+    mixCoeff = std::exp (-1.0f / (0.03f * fs));
+    wetMixInc = dryMixInc = 0.0f;
 
     driveAmt = clamp01 (params.drive) + toneA * (driveAmt - clamp01 (params.drive));
     if (driveAmt < 1.0e-5f) driveAmt = 0.0f;
@@ -441,18 +453,19 @@ void Engine::renderSlice (float* L, float* R, const float* keyL, const float* ke
         if (duckAmt > 1.0e-5f)
             duckGain = 1.0f - 0.9f * duckAmt * clamp01 ((gainToDb (duckEnv) + 40.0f) / 30.0f);
 
-        wetMix += wetMixInc;
-        dryMix += dryMixInc;
-        const float wetGain = wetMix * duckGain;
         if (mixDry)
         {
-            L[i] = dryMix * L[i] + wetGain * wetL;
-            R[i] = dryMix * R[i] + wetGain * wetR;
+            mixSm = mixTarget + mixCoeff * (mixSm - mixTarget);
+            const float th = mixSm * kHalfPi;
+            wetMix = std::sin (th);
+            dryMix = std::cos (th);
+            L[i] = dryMix * L[i] + wetMix * duckGain * wetL;
+            R[i] = dryMix * R[i] + wetMix * duckGain * wetR;
         }
         else
         {
-            L[i] = wetGain * wetL;
-            R[i] = wetGain * wetR;
+            L[i] = duckGain * wetL;
+            R[i] = duckGain * wetR;
         }
         duckGainShown = duckGain;
     }

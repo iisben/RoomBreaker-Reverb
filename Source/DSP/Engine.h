@@ -100,8 +100,13 @@ public:
     /** Message thread → audio thread: restore a saved structure (applied at the next block). */
     void requestStructureRestore (const WallArray& integrity) noexcept;
 
-    /** Latest integrity, readable from any thread. */
+    /** Latest integrity, readable from any thread. A restore that has not been applied yet
+        is reported in preference to the published walls, so a save during a sample-rate
+        change cannot write a pristine room over a damaged one. */
     WallArray currentIntegrity() const noexcept;
+
+    /** Exterior tank level at the last control tick (0 while that tank is idle). */
+    float exteriorLevel() const noexcept { return fdn.exteriorLevel(); }
 
     int controlBlockSize() const noexcept { return controlBlock; }
     const StressTracker& stressTracker() const noexcept { return stress; }
@@ -129,8 +134,9 @@ private:
     WallArray smoothedIntegrity {};
     float sizeSmoothed = 1.0f, sizeStage = 1.0f, shock = 0.0f, freezeSmoothed = 0.0f;
     OnePoleSmoother debrisSmoother;
-    float mixSm = 0.35f;                                        // glided Mix
-    float wetMix = 0.0f, wetMixInc = 0.0f, dryMix = 1.0f, dryMixInc = 0.0f;   // equal-power gains, ramped per sample
+    float mixSm = 0.35f;                                        // glided Mix (equal-power, per sample)
+    float mixTarget = 0.35f, mixCoeff = 0.0f;
+    float wetMix = 0.0f, wetMixInc = 0.0f, dryMix = 1.0f, dryMixInc = 0.0f;   // gains, written per sample when mixDry
     float lowCutSet = -1.0f, highCutSet = -1.0f;                // cutoffs the filters were last set to
 
     // Pre-delay (room input and stress source both go through it, so the walls react in sync)

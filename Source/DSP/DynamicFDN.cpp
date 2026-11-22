@@ -4,12 +4,6 @@ namespace rb::dsp
 {
 namespace
 {
-    // Line lengths (ms at Size 1): spread over two octaves and chosen so that no pair sits near a
-    // simple ratio (2:1, 3:2 …), which would stack their modes on the same frequencies.
-    // Total 784 ms → 0.78 modes per Hz, twice the density of the old 8-line set.
-    constexpr float kBaseMs[DynamicFDN::N] = { 20.6f, 23.3f, 26.5f, 27.7f, 32.1f, 34.1f, 37.7f, 40.6f,
-                                               45.0f, 49.5f, 58.3f, 63.7f, 71.3f, 78.1f, 84.1f, 91.5f };
-
     // The two boundaries each line's energy bounces between: all 15 wall pairs, plus the
     // floor-ceiling pair again (the room's shortest axis). Every wall feeds 5 or 6 lines.
     constexpr int kLineWalls[DynamicFDN::N][2] =
@@ -20,11 +14,13 @@ namespace
         { Ceiling, East },  { Floor, North },  { Floor, South },   { Ceiling, Floor }
     };
 
-    // Bent sequences (flat Walsh spectrum), mutually orthogonal: the Hadamard matrix maps each
-    // to another ±1 pattern, so injected sound is never focused into a few lines, and the left
-    // and right pickups stay decorrelated.
-    constexpr float kInL[DynamicFDN::N]  = { +1, +1, +1, +1, +1, -1, +1, -1, +1, +1, -1, -1, +1, -1, -1, +1 };
-    constexpr float kInR[DynamicFDN::N]  = { +1, -1, +1, +1, -1, +1, -1, -1, +1, -1, +1, +1, +1, -1, +1, +1 };
+    // Inputs are the original bent rows rotated by 22.5° (cos π/8, sin π/8). inL, inR, their
+    // sum and their difference then have no zero taps, so a centered or mono source drives all
+    // 16 lines. Norms stay 4 and the four-way orthogonality with the output rows is unchanged.
+    constexpr float kInL[DynamicFDN::N]  = {  1.3065630f,  0.5411961f,  1.3065630f,  1.3065630f,  0.5411961f, -0.5411961f,  0.5411961f, -1.3065630f,
+                                              1.3065630f,  0.5411961f, -0.5411961f, -0.5411961f,  1.3065630f, -1.3065630f, -0.5411961f,  1.3065630f };
+    constexpr float kInR[DynamicFDN::N]  = {  0.5411961f, -1.3065630f,  0.5411961f,  0.5411961f, -1.3065630f,  1.3065630f, -1.3065630f, -0.5411961f,
+                                              0.5411961f, -1.3065630f,  1.3065630f,  1.3065630f,  0.5411961f, -0.5411961f,  1.3065630f,  0.5411961f };
     constexpr float kOutL[DynamicFDN::N] = { +1, +1, -1, -1, -1, +1, +1, -1, +1, +1, +1, +1, -1, +1, -1, +1 };
     constexpr float kOutR[DynamicFDN::N] = { +1, +1, -1, +1, +1, +1, -1, +1, -1, -1, +1, -1, +1, +1, -1, +1 };
 
@@ -85,9 +81,12 @@ void ExteriorTank::reset()
     for (auto& a : smear) a.reset();
     for (auto& d : damping) d.reset();
     hpL.reset(); hpR.reset();
-    inputGain = inputGainInc = returnGainInc = diffusionInc = 0.0f;
+    inputGain = inputGainInc = returnGainInc = diffusionInc = hpGInc = 0.0f;
+    gainInc.fill (0.0f);
+    dampInc.fill (0.0f);
     lfoPhase = { 0.0f, 1.57f, 3.14f, 4.71f };
     level = 0.0f;
+    circulating.store (0.0f, std::memory_order_relaxed);
     quietTicks = 0;
     idle = true;
     initialised = false;
@@ -101,6 +100,7 @@ void ExteriorTank::setProfile (const VoidProfile& v, int n) noexcept
     const float glide = 1.0f - std::exp (-dt / 0.15f);   // geometry glides ~150 ms when the void changes
 
     // Nothing coming in and nothing left circulating: stop running the tank until a breach feeds it.
+    circulating.store (level, std::memory_order_relaxed);
     if (level < kIdleLevel) { if (++quietTicks > 8) idle = true; }
     else                    quietTicks = 0;
     level = 0.0f;
@@ -111,6 +111,15 @@ void ExteriorTank::setProfile (const VoidProfile& v, int n) noexcept
     inputGainInc  = ((v.collects ? 1.0f : 0.0f) - inputGain) * invN;
     drive = v.drive;
 
+    // Schroeder allpass H = (z^{-L} - g) / (1 - g z^{-L}) has low-frequency group delay
+    // L·(1+g)/(1-g), not L. g = kSmearGain · diffusion.
+    const float gSmear = std::min (0.95f, kSmearGain * std::clamp (v.diffusion, 0.0f, 1.0f));
+    const float smearStretch = (1.0f + gSmear) / (1.0f - gSmear);
+    const float gDamp = std::tan (kPi * std::clamp (v.dampHz, 1.0f, 0.49f * fs) / fs);
+    const float dampTarget = gDamp / (1.0f + gDamp);
+    const float gHp = std::tan (kPi * std::clamp (v.hpHz, 1.0f, 0.49f * fs) / fs);
+    const float hpTarget = gHp / (1.0f + gHp);
+
     for (int k = 0; k < N; ++k)
     {
         const size_t i = (size_t) k;
@@ -120,10 +129,15 @@ void ExteriorTank::setProfile (const VoidProfile& v, int n) noexcept
         lfoPhase[i] += kTwoPi * v.modRateHz * dt * (1.0f + 0.13f * (float) k);
         if (lfoPhase[i] > kTwoPi) lfoPhase[i] -= kTwoPi;
 
+        const float smearDelay = kSmearMs[k] * 1.0e-3f * fs * smearStretch;
         if (idle && initialised)
         {
             D[i] = std::clamp (baseD[i], 4.0f, maxD);   // follow the geometry silently
             DInc[i] = 0.0f;
+            gains[i] = std::pow (10.0f, -3.0f * (D[i] + smearDelay) / (v.rt60 * fs));
+            gainInc[i] = 0.0f;
+            damping[i].G = dampTarget;
+            dampInc[i] = 0.0f;
             continue;
         }
 
@@ -131,27 +145,41 @@ void ExteriorTank::setProfile (const VoidProfile& v, int n) noexcept
         if (! initialised) D[i] = modulated;
         DInc[i] = (modulated - D[i]) * invN;
 
-        // RT60 over the whole loop: the line plus the allpass inside it (its mean delay is its length).
-        const float loop = modulated + kSmearMs[k] * 1.0e-3f * fs;
-        gains[i] = std::pow (10.0f, -3.0f * loop / (v.rt60 * fs));
-        damping[i].set (v.dampHz, fs);
+        const float loop = modulated + smearDelay;
+        const float gLoop = std::pow (10.0f, -3.0f * loop / (v.rt60 * fs));
+        if (! initialised) gains[i] = gLoop;
+        gainInc[i] = (gLoop - gains[i]) * invN;
+        if (! initialised) damping[i].G = dampTarget;
+        dampInc[i] = (dampTarget - damping[i].G) * invN;
     }
 
-    hpL.set (v.hpHz, fs);
-    hpR.set (v.hpHz, fs);
+    if (! initialised || idle) { hpL.G = hpR.G = hpTarget; hpGInc = 0.0f; }
+    else                       hpGInc = (hpTarget - hpL.G) * invN;
     initialised = true;
 }
 
 void ExteriorTank::processSample (float in, float& outL, float& outR) noexcept
 {
+    if (! std::isfinite (in)) in = 0.0f;
     inputGain  = clamp01 (inputGain + inputGainInc);
     diffusion  = clamp01 (diffusion + diffusionInc);
     returnGain += returnGainInc;
+    hpL.G += hpGInc;
+    hpR.G = hpL.G;
 
     const float x = in * inputGain;
     if (idle)
     {
-        if (x == 0.0f) { outL = outR = 0.0f; return; }
+        if (x == 0.0f)
+        {
+            for (int k = 0; k < N; ++k)
+            {
+                gains[(size_t) k] += gainInc[(size_t) k];
+                damping[(size_t) k].G += dampInc[(size_t) k];
+            }
+            outL = outR = 0.0f;
+            return;
+        }
         idle = false;
         quietTicks = 0;
     }
@@ -159,8 +187,13 @@ void ExteriorTank::processSample (float in, float& outL, float& outR) noexcept
     std::array<float, N> s {};
     for (int k = 0; k < N; ++k)
     {
-        D[(size_t) k] += DInc[(size_t) k];
-        s[(size_t) k] = lines[(size_t) k].tap (D[(size_t) k]);
+        const size_t i = (size_t) k;
+        D[i] += DInc[i];
+        gains[i] += gainInc[i];
+        damping[i].G += dampInc[i];
+        float tap = lines[i].readSinc (D[i]);
+        if (! std::isfinite (tap)) { lines[i].clear(); tap = 0.0f; }
+        s[i] = tap;
     }
 
     float l = 0.5f * (s[0] - s[1] + s[2] - s[3]);
@@ -195,7 +228,18 @@ void ExteriorTank::processSample (float in, float& outL, float& outR) noexcept
     // Householder with diffusion: eigenvalues 1 and 1 − 2·diffusion, so |λ| ≤ 1 always.
     const float mix = diffusion * 0.5f * sum;
     for (int k = 0; k < N; ++k)
-        lines[(size_t) k].push (s[(size_t) k] - mix + x * kExteriorIn[k]);
+    {
+        const size_t i = (size_t) k;
+        float sample = s[i] - mix + x * kExteriorIn[k];
+        if (! std::isfinite (sample))
+        {
+            sample = 0.0f;
+            lines[i].clear();
+            smear[i].reset();
+            damping[i].reset();
+        }
+        lines[i].push (sample);
+    }
 }
 
 //==============================================================================
@@ -203,7 +247,7 @@ void DynamicFDN::prepare (double sampleRate)
 {
     fs = (float) sampleRate;
     // Longest line, largest room, fully breached (+12 %), plus creak headroom.
-    const int maxSamples = (int) std::ceil (kBaseMs[N - 1] * 1.0e-3f * fs * kMaxSize * 1.15f + 0.01f * fs);
+    const int maxSamples = (int) std::ceil (kFdnBaseMs[N - 1] * 1.0e-3f * fs * kMaxSize * 1.15f + 0.01f * fs);
     for (auto& d : delay)
         d.prepare (maxSamples);
     maxDelay = delay[0].maxDelay() - 2.0f;
@@ -224,7 +268,7 @@ void DynamicFDN::reset()
     for (int k = 0; k < N; ++k)
     {
         delay[(size_t) k].reset();
-        bank.D[k] = kBaseMs[k] * 1.0e-3f * fs;
+        bank.D[k] = kFdnBaseMs[k] * 1.0e-3f * fs;
         bank.hfGain[k] = 1.0f;
         bank.slabNorm[k] = 1.0f;
         bank.ventK[k] = 1.41421356f;
@@ -281,7 +325,7 @@ void DynamicFDN::updateFilters (const WallArray& I, const MaterialProfile& m, fl
         meanLoose  += loose  / (float) N;
 
         // --- nominal length: the room "opens up" as walls breach.
-        mo.baseD = kBaseMs[k] * 1.0e-3f * fs * sizeScale * (1.0f + 0.12f * breach);
+        mo.baseD = kFdnBaseMs[k] * 1.0e-3f * fs * sizeScale * (1.0f + 0.12f * breach);
         mo.loose = loose;
 
         // --- broadband loop gain: RT60 (g = 10^(-3·D / (T60·fs))), stretched where slabs resonate,
@@ -299,16 +343,16 @@ void DynamicFDN::updateFilters (const WallArray& I, const MaterialProfile& m, fl
         // --- stage 2: loose-slab resonance, normalised so the bell's peak is unity (G = +20 dB · loose).
         const float G = loose > 0.0f ? std::exp (2.3025851f * loose) : 1.0f;
         svf (m.slabHz[(size_t) slabWall] * (1.0f + 0.017f * (float) k) * slabSizeScale, kq,
-             bank.slabA1[k], bank.slabA2[k], bank.slabA3[k]);
-        bank.slabGm1k[k] = (G - 1.0f) * kq;
-        bank.slabNorm[k] = 1.0f / G;
+             bank.slabA1T[k], bank.slabA2T[k], bank.slabA3T[k]);
+        bank.slabGm1kT[k] = (G - 1.0f) * kq;
+        bank.slabNormT[k] = 1.0f / G;
 
         // --- stage 3: high-pass venting (12 Hz when a breach begins → ~900 Hz when the wall is gone).
         bank.ventK[k] = 1.41421356f;
         svf (12.0f + (breach > 0.0f ? 900.0f * std::exp (1.3f * std::log (breach)) : 0.0f), bank.ventK[k],
-             bank.ventA1[k], bank.ventA2[k], bank.ventA3[k]);
-        bank.ventAmount[k] = breach;
-        bank.ventKeep[k] = 1.0f - 0.65f * breach;
+             bank.ventA1T[k], bank.ventA2T[k], bank.ventA3T[k]);
+        bank.ventAmountT[k] = breach;
+        bank.ventKeepT[k] = 1.0f - 0.65f * breach;
     }
     targetBleed = std::clamp (0.9f * meanBreach + 0.3f * meanLoose, 0.0f, 0.95f);
 
@@ -370,12 +414,22 @@ void DynamicFDN::updateControl (const WallArray& I, const MaterialProfile& m,
     for (int w = 0; w < kNumWalls && ! dirty; ++w)
         dirty = std::abs (I[(size_t) w] - filterIntegrity[(size_t) w]) > 2.0e-4f;
 
+    auto rampOrSnap = [invN] (float* live, const float* target, float* inc, bool snap) noexcept
+    {
+        for (int k = 0; k < N; ++k)
+        {
+            if (snap) { live[k] = target[k]; inc[k] = 0.0f; }
+            else      inc[k] = (target[k] - live[k]) * invN;
+        }
+    };
+
     if (dirty)
     {
         filterMaterial = &m;
         filterDecay = tc.decaySeconds;
         filterSize = tc.sizeScale;
         filterIntegrity = I;
+        const bool slabWas = slabOn, ventWas = ventOn;
         updateFilters (I, m, tc.decaySeconds, tc.sizeScale);
         const bool first = bank.shelfG[0] <= 0.0f;   // nothing to ramp from yet
         for (int k = 0; k < N; ++k)
@@ -386,6 +440,20 @@ void DynamicFDN::updateControl (const WallArray& I, const MaterialProfile& m,
             bank.shelfGInc[k] = (mo.targetShelfG - bank.shelfG[k]) * invN;   // a stepped corner ticks: ramp it
             bank.hfGainInc[k] = (mo.targetHf - bank.hfGain[k]) * invN;
         }
+        // Slab and vent coefficients step on a fracture. Ramp them across the tick; snap when a
+        // stage is switching on, because ramping a1 up from 0 is not a real SVF for that block.
+        const bool snapSlab = first || (slabOn && ! slabWas);
+        const bool snapVent = first || (ventOn && ! ventWas);
+        rampOrSnap (bank.slabA1, bank.slabA1T, bank.slabA1Inc, snapSlab);
+        rampOrSnap (bank.slabA2, bank.slabA2T, bank.slabA2Inc, snapSlab);
+        rampOrSnap (bank.slabA3, bank.slabA3T, bank.slabA3Inc, snapSlab);
+        rampOrSnap (bank.slabGm1k, bank.slabGm1kT, bank.slabGm1kInc, snapSlab);
+        rampOrSnap (bank.slabNorm, bank.slabNormT, bank.slabNormInc, snapSlab);
+        rampOrSnap (bank.ventA1, bank.ventA1T, bank.ventA1Inc, snapVent);
+        rampOrSnap (bank.ventA2, bank.ventA2T, bank.ventA2Inc, snapVent);
+        rampOrSnap (bank.ventA3, bank.ventA3T, bank.ventA3Inc, snapVent);
+        rampOrSnap (bank.ventAmount, bank.ventAmountT, bank.ventAmountInc, snapVent);
+        rampOrSnap (bank.ventKeep, bank.ventKeepT, bank.ventKeepInc, snapVent);
         bleedInc = (targetBleed - bleed) * invN;
         filtersSettled = false;
     }
@@ -400,6 +468,16 @@ void DynamicFDN::updateControl (const WallArray& I, const MaterialProfile& m,
             bank.hfGain[k] = mo.targetHf;
             bank.gainInc[k] = bank.shelfGInc[k] = bank.hfGainInc[k] = 0.0f;
         }
+        rampOrSnap (bank.slabA1, bank.slabA1T, bank.slabA1Inc, true);
+        rampOrSnap (bank.slabA2, bank.slabA2T, bank.slabA2Inc, true);
+        rampOrSnap (bank.slabA3, bank.slabA3T, bank.slabA3Inc, true);
+        rampOrSnap (bank.slabGm1k, bank.slabGm1kT, bank.slabGm1kInc, true);
+        rampOrSnap (bank.slabNorm, bank.slabNormT, bank.slabNormInc, true);
+        rampOrSnap (bank.ventA1, bank.ventA1T, bank.ventA1Inc, true);
+        rampOrSnap (bank.ventA2, bank.ventA2T, bank.ventA2Inc, true);
+        rampOrSnap (bank.ventA3, bank.ventA3T, bank.ventA3Inc, true);
+        rampOrSnap (bank.ventAmount, bank.ventAmountT, bank.ventAmountInc, true);
+        rampOrSnap (bank.ventKeep, bank.ventKeepT, bank.ventKeepInc, true);
         bleed = targetBleed;
         bleedInc = 0.0f;
         filtersSettled = true;
@@ -436,23 +514,31 @@ void DynamicFDN::process (const float* inL, const float* inR,
 
     for (int i = 0; i < n; ++i)
     {
-        alignas (64) float p0[N], p1[N], p2[N], p3[N], fr[N];
         alignas (64) float s[N], y[N], v[N], tL[N], tR[N];
 
         // Read every line (the only part that cannot be done in parallel).
         for (int k = 0; k < N; ++k)
-            delay[(size_t) k].fetch (b.D[k], p0[k], p1[k], p2[k], p3[k], fr[k]);
+        {
+            float sk = delay[(size_t) k].readSinc (b.D[k]);
+            if (! std::isfinite (sk))
+            {
+                delay[(size_t) k].clear();
+                b.shelfS[k] = b.slabS1[k] = b.slabS2[k] = b.ventS1[k] = b.ventS2[k] = 0.0f;
+                sk = 0.0f;
+            }
+            s[k] = sk;
+        }
 
         freeze += freezeInc;
-        const float live = 1.0f - freeze, hold = freeze * 0.99998f;
+        const float live = 1.0f - freeze, hold = freeze * kFreezeLoopGain;
 
         // All 16 loop filters, stage by stage. Plain element-wise arithmetic on arrays: SIMD.
         alignas (64) float x[N], hp[N];
 
-        // Interpolate, then stage 1 — high shelf.
+        // Stage 1 — high shelf.
         for (int k = 0; k < N; ++k)
         {
-            const float sk = catmullRom (p0[k], p1[k], p2[k], p3[k], fr[k]);
+            const float sk = s[k];
             b.D[k] += b.DInc[k];
             b.gain[k] += b.gainInc[k];
             b.shelfG[k] += b.shelfGInc[k];
@@ -462,13 +548,17 @@ void DynamicFDN::process (const float* inL, const float* inR,
             const float lp = sv + b.shelfS[k];
             b.shelfS[k] = lp + sv;
             x[k] = lp + b.hfGain[k] * (sk - lp);
-            s[k] = sk;
         }
 
         // Stage 2 — normalised slab bell: (1 + (G-1)·BP̂) / G, BP̂ = k·bp has unity peak.
         if (slabOn)
             for (int k = 0; k < N; ++k)
             {
+                b.slabA1[k] += b.slabA1Inc[k];
+                b.slabA2[k] += b.slabA2Inc[k];
+                b.slabA3[k] += b.slabA3Inc[k];
+                b.slabGm1k[k] += b.slabGm1kInc[k];
+                b.slabNorm[k] += b.slabNormInc[k];
                 const float v3 = x[k] - b.slabS2[k];
                 const float v1 = b.slabA1[k] * b.slabS1[k] + b.slabA2[k] * v3;
                 const float v2 = b.slabS2[k] + b.slabA2[k] * b.slabS1[k] + b.slabA3[k] * v3;
@@ -484,6 +574,11 @@ void DynamicFDN::process (const float* inL, const float* inR,
         {
             for (int k = 0; k < N; ++k)
             {
+                b.ventA1[k] += b.ventA1Inc[k];
+                b.ventA2[k] += b.ventA2Inc[k];
+                b.ventA3[k] += b.ventA3Inc[k];
+                b.ventAmount[k] += b.ventAmountInc[k];
+                b.ventKeep[k] += b.ventKeepInc[k];
                 const float v3 = x[k] - b.ventS2[k];
                 const float v1 = b.ventA1[k] * b.ventS1[k] + b.ventA2[k] * v3;
                 const float v2 = b.ventS2[k] + b.ventA2[k] * b.ventS1[k] + b.ventA3[k] * v3;
@@ -512,6 +607,12 @@ void DynamicFDN::process (const float* inL, const float* inR,
         // Input diffusion, then injection (muted while frozen).
         apGain += apGainInc;
         float dl = inL[i], dr = inR[i];
+        if (! std::isfinite (dl) || ! std::isfinite (dr))
+        {
+            dl = dr = 0.0f;
+            for (auto& d : diffL) d.reset();
+            for (auto& d : diffR) d.reset();
+        }
         for (int k = 0; k < kDiffusers; ++k)
         {
             const float gk = k < 2 ? apGain : 0.85f * apGain;
@@ -531,7 +632,15 @@ void DynamicFDN::process (const float* inL, const float* inR,
         for (int k = 0; k < N; ++k)
             y[k] = mixH * s[k] + keep * y[k] + kInL[k] * xl + kInR[k] * xr;
         for (int k = 0; k < N; ++k)
+        {
+            if (! std::isfinite (y[k]))
+            {
+                y[k] = 0.0f;
+                delay[(size_t) k].clear();
+                b.shelfS[k] = b.slabS1[k] = b.slabS2[k] = b.ventS1[k] = b.ventS2[k] = 0.0f;
+            }
             delay[(size_t) k].push (y[k]);
+        }
 
         exterior.processSample (vented * 0.5f, extL[i], extR[i]);
     }

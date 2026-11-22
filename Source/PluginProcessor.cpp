@@ -32,8 +32,8 @@ RoomBreakerAudioProcessor::RoomBreakerAudioProcessor()
 {
     for (auto& e : engines)
         e.setMixDry (false);   // dry is mixed here, at the host rate
-    activeIndex = params.oversamplingIndex();
-    engines[(size_t) activeIndex].setTelemetry (&telemetry);
+    activeIndex.store (params.oversamplingIndex());
+    engines[(size_t) activeIndex.load()].setTelemetry (&telemetry);
 }
 
 bool RoomBreakerAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -92,16 +92,17 @@ void RoomBreakerAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 
     inGain.reset (sampleRate, 0.03);
     outGain.reset (sampleRate, 0.03);
-    dryGain.reset (sampleRate, 0.03);
+    mixAngle.reset (sampleRate, 0.03);
     inGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.inputGainDb()));
     outGain.setCurrentAndTargetValue (juce::Decibels::decibelsToGain (params.outputGainDb()));
-    dryGain.setCurrentAndTargetValue (std::cos (params.mixAmount() * juce::MathConstants<float>::halfPi));
+    mixAngle.setCurrentAndTargetValue (params.mixAmount() * juce::MathConstants<float>::halfPi);
 
     for (auto& e : engines) e.setTelemetry (nullptr);
-    activeIndex = params.oversamplingIndex();
+    activeIndex.store (params.oversamplingIndex());
     fadingIndex = -1;
-    engines[(size_t) activeIndex].setTelemetry (&telemetry);
-    activeFactor.store (rb::kOversamplingFactors[activeIndex]);
+    const int active = activeIndex.load();
+    engines[(size_t) active].setTelemetry (&telemetry);
+    activeFactor.store (rb::kOversamplingFactors[active]);
 
     lastResetState = params.resetHeld();
     lastDetonateState = params.detonateHeld();
@@ -110,16 +111,34 @@ void RoomBreakerAudioProcessor::prepareToPlay (double sampleRate, int samplesPer
 
 double RoomBreakerAudioProcessor::getTailLengthSeconds() const
 {
-    // Room tail, or the exterior void's own RT60 when it collects energy (Abyssal Drone: 90 s).
-    // A break goes on sounding after the input stops (aftershocks, rubble settling) and that
-    // sound rings in the room too, so the settle time is added whenever destruction is audible.
-    // Hosts stop calling a plugin once this has passed, so anything later would be cut off.
+    // Hosts stop calling a plugin once this has passed, so anything still audible would be cut off.
+    // Loose walls stretch the room's RT60 by up to 2.5x. Freeze holds each circulation at
+    // kFreezeLoopGain, which is hours, not the decay knob. A void that is still ringing
+    // (including Free Field, once a breach has fed it) is reported from its own RT60.
     const auto p = params.snapshot();
     const bool breaksAudible = p.impact > 0.0f || p.rumble > 0.0f || p.debrisLevel > 0.0f;
-    const double roomTail = (double) p.decaySeconds * 1.5 + 2.0 + 0.25
-                          + (breaksAudible ? (double) rb::dsp::ImpactGenerator::kMaxSettleSeconds : 0.0);
+    const int active = activeIndex.load (std::memory_order_acquire);
+    const auto integrity = engines[(size_t) active].currentIntegrity();
+    float meanLoose = 0.0f;
+    for (int w = 0; w < rb::dsp::kNumWalls; ++w)
+        meanLoose += rb::dsp::loosenessAmount (integrity[(size_t) w]);
+    meanLoose /= (float) rb::dsp::kNumWalls;
+    const double stretch = 1.0 / (1.0 - 0.6 * (double) meanLoose);
+    double roomTail = (double) p.decaySeconds * 1.5 * stretch + 2.25
+                    + (breaksAudible ? (double) rb::dsp::ImpactGenerator::kMaxSettleSeconds : 0.0);
+
+    if (p.freeze)
+    {
+        const double loops = -3.0 / std::log10 ((double) rb::dsp::kFreezeLoopGain);
+        const double size = (double) std::clamp (p.size, 0.4f, 2.0f);
+        const double longest = (double) rb::dsp::kFdnBaseMs[15] * 1.0e-3 * size * 1.12;
+        roomTail = std::max (roomTail, loops * longest);
+    }
+
     const auto& exteriorVoid = rb::dsp::getVoidProfile (params.voidIndex());
-    return exteriorVoid.collects ? std::max (roomTail, (double) exteriorVoid.rt60 * 1.2) : roomTail;
+    const bool exteriorAlive = exteriorVoid.collects
+                            || engines[(size_t) active].exteriorLevel() > 1.0e-7f;
+    return exteriorAlive ? std::max (roomTail, (double) exteriorVoid.rt60 * 1.2) : roomTail;
 }
 
 //==============================================================================
@@ -135,18 +154,19 @@ void RoomBreakerAudioProcessor::startOversamplingSwitch (int newIndex)
     // input from now on. The outgoing one stops receiving input but keeps rendering, so the tail
     // that was already ringing carries on (fading out over ~1 s) instead of being cut off.
     auto& incoming = engines[(size_t) newIndex];
-    const auto integrity = engines[(size_t) activeIndex].currentIntegrity();
+    const int current = activeIndex.load (std::memory_order_relaxed);
+    const auto integrity = engines[(size_t) current].currentIntegrity();
     incoming.setParams (params.snapshot());
+    incoming.requestStructureRestore (integrity);   // before reset, so reset does not publish pristine walls
     incoming.reset();
-    incoming.requestStructureRestore (integrity);
     if (oversamplers[(size_t) newIndex] != nullptr)
         oversamplers[(size_t) newIndex]->reset();
 
-    engines[(size_t) activeIndex].setTelemetry (nullptr);
+    engines[(size_t) current].setTelemetry (nullptr);
     incoming.setTelemetry (&telemetry);
 
-    fadingIndex = activeIndex;
-    activeIndex = newIndex;
+    fadingIndex = current;
+    activeIndex.store (newIndex, std::memory_order_release);
     fadePos = 0;
     fadeLength = std::max (1, (int) (hostRate * kTailHandoverSeconds));
     activeFactor.store (rb::kOversamplingFactors[newIndex], std::memory_order_relaxed);
@@ -223,8 +243,9 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     const auto snapshot = params.snapshot();
 
     // Oversampling change → crossfade to the engine prepared for that rate.
-    if (const int wanted = params.oversamplingIndex(); wanted != activeIndex && fadingIndex < 0)
+    if (const int wanted = params.oversamplingIndex(); wanted != activeIndex.load (std::memory_order_relaxed) && fadingIndex < 0)
         startOversamplingSwitch (wanted);
+    const int active = activeIndex.load (std::memory_order_relaxed);
 
     // Momentary buttons — edge triggered so a held or automated "on" only fires once.
     const bool resetNow = params.resetHeld();
@@ -235,19 +256,19 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
     const bool detonateNow = params.detonateHeld();
     if (detonateNow && ! lastDetonateState)
     {
-        engines[(size_t) activeIndex].detonate();
+        engines[(size_t) active].detonate();
         detonateCount.fetch_add (1, std::memory_order_relaxed);
     }
     lastDetonateState = detonateNow;
 
-    engines[(size_t) activeIndex].setParams (snapshot);
+    engines[(size_t) active].setParams (snapshot);
     if (fadingIndex >= 0)
         engines[(size_t) fadingIndex].setParams (snapshot);
 
     inGain.setTargetValue (juce::Decibels::decibelsToGain (params.inputGainDb()));
     bypassMix.setTargetValue (params.bypassed() ? 1.0f : 0.0f);
     outGain.setTargetValue (juce::Decibels::decibelsToGain (params.outputGainDb()));
-    dryGain.setTargetValue (std::cos (snapshot.mix * juce::MathConstants<float>::halfPi));
+    mixAngle.setTargetValue (snapshot.mix * juce::MathConstants<float>::halfPi);
     const bool limiterOn = params.limiterOn();
 
     auto scBuffer = haveKey ? getBusBuffer (buffer, true, 1) : juce::AudioBuffer<float>();
@@ -314,7 +335,7 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
 
         auto* wl = wetBuf.getWritePointer (0);
         auto* wr = wetBuf.getWritePointer (1);
-        renderWet (activeIndex, engL, engR, bypassing ? nullptr : kl, bypassing ? nullptr : kr, wl, wr, n);
+        renderWet (active, engL, engR, bypassing ? nullptr : kl, bypassing ? nullptr : kr, wl, wr, n);
 
         if (fadingIndex >= 0)
         {
@@ -340,10 +361,11 @@ void RoomBreakerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, 
 
         for (int i = 0; i < n; ++i)
         {
-            const float dg = dryGain.getNextValue();
+            const float th = mixAngle.getNextValue();
+            const float dry = std::cos (th), wet = std::sin (th);
             const float og = outGain.getNextValue();
-            float l = (dg * dl[i] + wl[i]) * og;
-            float r = (dg * dr[i] + wr[i]) * og;
+            float l = (dry * dl[i] + wet * wl[i]) * og;
+            float r = (dry * dr[i] + wet * wr[i]) * og;
             peakRaw = std::max (peakRaw, std::max (std::abs (l), std::abs (r)));
             if (limiterOn) { l = softLimit (l); r = softLimit (r); }
             if (bypassing)
@@ -445,7 +467,7 @@ void RoomBreakerAudioProcessor::getStateInformation (juce::MemoryBlock& destData
     state.setProperty (kScaleProperty, editorScale.load(), nullptr);
     presets.writeState (state);
     auto structure = state.getOrCreateChildWithName (kStructureTag, nullptr);
-    const auto integrity = engines[(size_t) activeIndex].currentIntegrity();   // atomics: safe from the message thread
+    const auto integrity = engines[(size_t) activeIndex.load (std::memory_order_acquire)].currentIntegrity();
     for (int w = 0; w < rb::dsp::kNumWalls; ++w)
         structure.setProperty (wallKey (w), integrity[(size_t) w], nullptr);
 
