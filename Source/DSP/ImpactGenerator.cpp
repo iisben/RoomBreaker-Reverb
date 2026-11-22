@@ -39,6 +39,30 @@ namespace
         l = std::cos (theta);
         r = std::sin (theta);
     }
+
+    // How a hit excites a band. Ringing materials (ice, glass, steel) get a short burst and a
+    // high Q, so the band rings after the hit. Dull ones (concrete, stone) get a longer, grittier
+    // burst and a little noise left in the tail.
+    struct Snap
+    {
+        float q;
+        float burstMs;
+        float tail;
+    };
+
+    Snap snapOf (const MaterialVoicing& v) noexcept
+    {
+        const float ring = std::clamp (0.55f * v.chirp + 0.45f * v.shatter, 0.0f, 1.0f);
+        const float dull = std::clamp (v.creakGrit, 0.0f, 1.0f);
+        return { 0.75f + 4.4f * ring * (1.0f - 0.30f * dull),
+                 0.18f + 1.70f * (1.0f - ring) * (0.40f + 0.60f * dull),
+                 0.03f + 0.24f * dull * (1.0f - 0.85f * ring) };
+    }
+
+    float partialOf (const MaterialVoicing& v) noexcept
+    {
+        return v.shatter > 0.45f ? 2.27f : 1.59f;   // glass/ice sit sharp of an octave; steel, a stretched fifth
+    }
 }
 
 void ImpactGenerator::prepare (double sampleRate)
@@ -80,7 +104,8 @@ ImpactGenerator::Noise& ImpactGenerator::allocateNoise() noexcept
     return *quietest;
 }
 
-void ImpactGenerator::startNoise (float hz, float q, float amp, float decayMs, int delay, float pan) noexcept
+void ImpactGenerator::startNoise (float hz, float q, float amp, float decayMs, int delay, float pan,
+                                  float burstMs, float tail) noexcept
 {
     if (amp <= 1.0e-5f)
         return;
@@ -91,6 +116,8 @@ void ImpactGenerator::startNoise (float hz, float q, float amp, float decayMs, i
     n.band.set (std::clamp (hz, 25.0f, std::min (16000.0f, 0.45f * fs)), q, fs);
     n.amp = amp;
     n.decay = std::exp (-1.0f / (std::max (decayMs, 0.3f) * 1.0e-3f * fs));
+    n.burst = std::max (1.0f, burstMs * 1.0e-3f * fs);
+    n.tail = std::clamp (tail, 0.0f, 1.0f);
     n.rng = Rng (rng.next());
     panGains (pan, n.panL, n.panR);
 }
@@ -111,11 +138,19 @@ void ImpactGenerator::startChirp (float hiHz, float loHz, float ms, float amp, i
     c->phase      = 0.0f;
     c->freq       = std::min (hiHz, 0.4f * fs);
     c->freqMul    = std::pow (loHz / hiHz, 1.0f / n);            // exponential sweep, hi → lo over ms
-    c->freqMin    = 0.5f * loHz;
+    c->freqMin    = std::max (loHz, 40.0f);                        // settle on the slow wave and ring there
     c->amp        = amp;
     c->ampDecay   = std::exp (-1.0f / (0.45f * n));               // ~ -19 dB by the end of the sweep
     c->attack     = 0.0f;
     c->attackInc  = 1.0f / (0.0003f * fs);
+    c->phase2     = 0.0f;
+    c->lp1 = c->lp2 = 0.0f;
+    const float glass = voicing != nullptr ? std::clamp (voicing->shatter, 0.0f, 1.0f) : 0.0f;
+    const float metal = voicing != nullptr ? std::clamp (voicing->chirp, 0.0f, 1.0f) : 0.0f;
+    c->partial     = glass > 0.45f ? 2.31f : 1.62f;
+    c->partialGain = 0.20f + 0.22f * metal;
+    c->noiseMix    = 0.26f + 0.20f * (1.0f - metal) + 0.10f * glass;
+    c->rng         = Rng (rng.next() | 1u);
     panGains (pan, c->panL, c->panR);
 }
 
@@ -202,10 +237,20 @@ void ImpactGenerator::crack (int w, float m, int offset, float level) noexcept
     const float pan0 = kWallPan[(size_t) w] + 0.25f * rng.bi();
     const float dir = rng.uni() < 0.5f ? -1.0f : 1.0f;    // which way the crack runs
     const float mainAmp = kCrackLevel * level * std::pow (mm, 0.85f);
+    const Snap snap = snapOf (v);
+    const float qMain = snap.q * (1.15f - 0.40f * weight);   // a hairline rings a little more than a collapse
 
-    // The snap.
-    startNoise (v.crackHz * bright * (0.85f + 0.3f * rng.uni()), 1.1f, mainAmp,
-                v.crackMs * (0.6f + 0.7f * weight) * (0.8f + 0.4f * rng.uni()), offset, pan0);
+    // The snap: a short hit, then the band rings. A second partial on materials that sing.
+    const float snapHz = v.crackHz * bright * (0.85f + 0.3f * rng.uni());
+    startNoise (snapHz, qMain, mainAmp,
+                v.crackMs * (0.6f + 0.7f * weight) * (0.8f + 0.4f * rng.uni()), offset, pan0,
+                snap.burstMs * (0.65f + 0.70f * weight), snap.tail * (0.35f + 0.65f * weight));
+    if (snap.q > 1.7f)
+        startNoise (snapHz * partialOf (v), qMain * 1.25f, mainAmp * (0.28f + 0.20f * v.chirp),
+                    v.crackMs * (0.8f + 0.6f * v.chirp), offset, pan0, snap.burstMs * 0.40f, 0.0f);
+    if (weight > 0.22f)
+        startNoise (std::clamp (v.crackHz * 0.07f, 60.0f, 380.0f), 0.65f, mainAmp * 0.34f * weight,
+                    28.0f + 55.0f * weight, offset, 0.35f * pan0, 1.2f + 3.5f * weight, 0.16f);
 
     // The crack running through: micro-fractures spread over the material's crack time, coming
     // faster as it accelerates. Their sizes follow a power law (a few loud, many faint), and the
@@ -220,8 +265,9 @@ void ImpactGenerator::crack (int w, float m, int offset, float level) noexcept
         const float size = std::pow (rng.uni(), 2.2f);
         const float a = 0.55f * mainAmp * size * (1.0f - 0.45f * x);
         const float hz = v.crackHz * bright * (0.6f + 1.8f * rng.uni()) * (1.3f - 0.5f * size);
-        startNoise (hz, 1.4f, a, (0.4f + 2.5f * rng.uni()) * tickMs, offset + (int) t,
-                    pan0 + dir * 0.45f * x * (0.5f + 0.5f * weight));
+        startNoise (hz, snap.q * (1.25f - 0.60f * size), a, (0.4f + 2.5f * rng.uni()) * tickMs, offset + (int) t,
+                    pan0 + dir * 0.45f * x * (0.5f + 0.5f * weight),
+                    snap.burstMs * (0.30f + 0.90f * size), snap.tail * size);
     }
 
     // Dispersion: thin plates whistle. Bigger breaks sweep lower and longer, with more sweeps.
@@ -245,6 +291,9 @@ void ImpactGenerator::dropPieces (int w, float m, int offset) noexcept
     const float mm = std::min (m, 1.3f);
     const int count = std::clamp ((int) std::lround (rumbleAmount * (1.0f + 7.0f * mm) * v.grains), 0, 14);
     const float storey = kStoreyMetres * roomSize;
+    const Snap snap = snapOf (v);
+    const float ring = std::max (v.chirp, v.shatter);
+    const float rise = 1.04f + 0.10f * ring;   // later bounces are smaller, so they tick higher
 
     for (int i = 0; i < count; ++i)
     {
@@ -262,7 +311,7 @@ void ImpactGenerator::dropPieces (int w, float m, int offset) noexcept
         Pending p;
         p.due     = offset + (int) ((lag + fall) * fs);
         p.hz      = v.rubbleHz * (0.35f + 1.5f * (1.0f - s)) * (1.0f + 0.12f * rng.bi());
-        p.q       = 0.9f;
+        p.q       = snap.q * (1.20f - 0.55f * s);
         p.amp     = kPieceLevel * rumbleAmount * (0.2f + 0.8f * s) * std::min (1.0f, 0.35f + 0.13f * v0);
         p.decayMs = 3.0f + 35.0f * s;
         p.pan     = 0.8f * kWallPan[(size_t) w] + 0.4f * rng.bi();
@@ -270,6 +319,16 @@ void ImpactGenerator::dropPieces (int w, float m, int offset) noexcept
         p.rubble  = 0.03f + 0.1f * s;
         p.shatter = v.shatter * (1.0f + 4.0f * s);
         schedule (p);
+
+        // The tick as it lets go. The queue holds it, so a piece in the air does not occupy a voice.
+        Pending go;
+        go.kind = 1;
+        go.due  = offset + (int) (lag * fs);
+        go.hz   = p.hz;
+        go.q    = p.q;
+        go.amp  = p.amp * (0.14f + 0.40f * ring);
+        go.pan  = p.pan;
+        schedule (go);
 
         // Bounces: each rebound leaves at e times the speed, so it flies for 2·e·v/g and lands e times softer.
         float speed = v0, at = (float) p.due, amp = p.amp;
@@ -284,11 +343,12 @@ void ImpactGenerator::dropPieces (int w, float m, int offset) noexcept
             at += 2.0f * speed / kGravity * fs;
             Pending q;
             q.due     = (int) at;
-            q.hz      = p.hz * std::pow (1.08f, (float) b);
-            q.q       = 1.0f;
+            q.hz      = p.hz * std::pow (rise, (float) b);
+            q.q       = p.q * (1.0f + 0.15f * (float) b);
             q.amp     = amp;
-            q.decayMs = 0.7f * p.decayMs;
+            q.decayMs = std::max (2.0f, 0.65f * p.decayMs);
             q.pan     = p.pan + 0.08f * rng.bi();
+            q.shatter = p.shatter * 0.40f;
             schedule (q);
         }
     }
@@ -300,19 +360,45 @@ void ImpactGenerator::schedule (const Pending& p) noexcept
         pending[(size_t) numPending++] = p;
 }
 
+void ImpactGenerator::letGo (const Pending& p, int offset) noexcept
+{
+    const auto& v = *voicing;
+    const Snap snap = snapOf (v);
+    const float ring = std::max (v.chirp, v.shatter);
+    startNoise (std::min (12000.0f, p.hz * (2.2f + 2.2f * ring)),
+                std::max (1.8f, snap.q), p.amp, 5.0f + 14.0f * ring, offset, p.pan,
+                0.12f + 0.40f * (1.0f - ring), 0.0f);
+}
+
 void ImpactGenerator::land (const Pending& p, int offset) noexcept
 {
     const auto& v = *voicing;
-    startNoise (p.hz, p.q, p.amp, p.decayMs, offset, p.pan);
+    const Snap snap = snapOf (v);
+    const float ring = std::max (v.chirp, v.shatter);
+    // A heavy piece's body arrives a couple of milliseconds after the contact click.
+    const int follow = (int) (0.05f * std::min (p.decayMs, 40.0f) * 1.0e-3f * fs);
+
+    startNoise (std::min (14000.0f, p.hz * (3.2f + 3.0f * ring)),
+                std::max (2.0f, snap.q + 0.8f), p.amp * (0.42f + 0.40f * v.shatter),
+                5.0f + 18.0f * v.chirp, offset, p.pan, 0.12f + 0.20f * (1.0f - ring), 0.0f);
+    startNoise (p.hz, std::max (0.55f, p.q), p.amp, p.decayMs, offset + follow, p.pan,
+                std::clamp (0.40f + 0.07f * p.decayMs, 0.30f, 4.5f), snap.tail + 0.08f);
+    if (ring > 0.35f)
+        startNoise (std::min (14000.0f, p.hz * partialOf (v)), snap.q + 1.5f,
+                    p.amp * (0.22f + 0.30f * ring), p.decayMs * (1.2f + 0.8f * v.chirp),
+                    offset, p.pan, 0.22f, 0.0f);
     if (p.thump > 0.0f)
-        startNoise (v.boomHz * 2.2f * (1.0f + 0.1f * rng.bi()), 0.7f, p.thump, 40.0f, offset, 0.6f * p.pan);
+        startNoise (v.boomHz * 2.2f * (1.0f + 0.1f * rng.bi()), 0.7f, p.thump, 36.0f,
+                    offset + follow, 0.6f * p.pan, 2.2f, 0.18f);
     rubble = std::min (3.0f, rubble + p.rubble);
 
     // Brittle pieces burst on landing: a spray of tiny, bright fragments.
     const int fragments = (int) (p.shatter + rng.uni());
     for (int k = 0; k < fragments; ++k)
-        startNoise (v.crackHz * (1.2f + 1.3f * rng.uni()), 2.5f, 0.35f * p.amp * (0.3f + 0.7f * rng.uni()),
-                    1.0f + 3.0f * rng.uni(), offset + (int) (rng.uni() * 0.025f * fs), p.pan + 0.2f * rng.bi());
+        startNoise (v.crackHz * (1.2f + 1.3f * rng.uni()), std::max (2.5f, snap.q + 1.0f),
+                    0.35f * p.amp * (0.3f + 0.7f * rng.uni()),
+                    1.0f + 3.0f * rng.uni(), offset + (int) (rng.uni() * 0.025f * fs), p.pan + 0.2f * rng.bi(),
+                    0.15f, 0.0f);
 }
 
 //==============================================================================
@@ -365,8 +451,9 @@ void ImpactGenerator::trigger (const FractureEvent& e) noexcept
 
         // The thud: the broadband body of the hit, lower and longer for bigger breaks.
         const float mm = std::min (m, 1.0f);
-        startNoise (v.boomHz * (1.6f - 0.4f * mm) * (1.0f + 0.1f * rng.bi()), 0.55f,
-                    kThudLevel * newAmp * (merged ? 0.5f : 1.0f), 30.0f + 50.0f * mm, e.sampleOffset, 0.3f * kWallPan[(size_t) w]);
+        startNoise (v.boomHz * (1.6f - 0.4f * mm) * (1.0f + 0.1f * rng.bi()), 0.70f,
+                    kThudLevel * newAmp * (merged ? 0.5f : 1.0f), 30.0f + 50.0f * mm, e.sampleOffset,
+                    0.3f * kWallPan[(size_t) w], 2.5f + 5.0f * mm, 0.20f);
 
         crack (w, m, e.sampleOffset, impactAmount);
 
@@ -409,7 +496,10 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
         auto& p = pending[(size_t) i];
         if (p.due < blockLength)
         {
-            land (p, std::max (0, p.due));
+            if (p.kind != 0)
+                letGo (p, std::max (0, p.due));
+            else
+                land (p, std::max (0, p.due));
             pending[(size_t) i] = pending[(size_t) --numPending];
         }
         else
@@ -465,6 +555,7 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
     }
     if (impactAmount > 0.0f)
     {
+        const Snap snap = snapOf (v);
         for (int w = 0; w < kNumWalls; ++w)
         {
             if (integrityNow[(size_t) w] < 0.02f)
@@ -475,10 +566,19 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
                 continue;
             if (rng.uni() < 12.0f * x * x * dt)
             {
+                // Initiation, then arrest a fraction of a millisecond later. Ice and steel leave a faint ring.
                 const float size = rng.uni();
-                startNoise (v.crackHz * (1.6f + 1.6f * rng.uni()), 2.0f,
-                            kWarnLevel * impactAmount * (0.2f + 0.8f * size * size * size) * (0.5f + 0.5f * x),
-                            0.4f + 0.8f * rng.uni(), (int) (rng.uni() * block), kWallPan[(size_t) w] + 0.3f * rng.bi());
+                const float hz = v.crackHz * (1.5f + 1.8f * rng.uni());
+                const float amp = kWarnLevel * impactAmount * (0.2f + 0.8f * size * size * size) * (0.5f + 0.5f * x);
+                const float pan = kWallPan[(size_t) w] + 0.3f * rng.bi();
+                const int at = (int) (rng.uni() * block);
+                const int gap = 1 + (int) ((0.00045f + 0.0018f * rng.uni()) * fs);
+                startNoise (hz, snap.q * 1.2f, amp, 4.0f + 8.0f * rng.uni(), at, pan, snap.burstMs * 0.55f, 0.0f);
+                startNoise (hz * (1.12f + 0.28f * rng.uni()), snap.q, amp * 0.55f, 3.0f + 6.0f * rng.uni(),
+                            at + gap, pan, snap.burstMs * 0.40f, 0.0f);
+                if (snap.q > 2.2f)
+                    startNoise (v.crackHz * (0.42f + 0.18f * rng.uni()), std::min (snap.q * 1.8f, 8.0f), amp * 0.32f,
+                                16.0f + 22.0f * v.chirp, at + gap, pan, 0.25f, 0.0f);
             }
         }
     }
@@ -505,7 +605,8 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
         return;
 
     // Trickle: Poisson grains, mostly small, heavier when lots is coming down. The last ones are
-    // fewer and smaller too: dust, not stones.
+    // fewer and smaller too: dust, not stones. Each one is a hit, not a puff of noise.
+    const Snap snap = snapOf (v);
     const float rate = 70.0f * std::min (loose, 2.0f) * rumbleAmount;   // grains / s
     const float last = smoothstep (0.0f, 0.3f, loose);
     float expected = rate * dt;
@@ -516,7 +617,8 @@ void ImpactGenerator::update (float dt, int blockLength, float meanLooseness, fl
             const float size = rng.uni() * rng.uni();
             const float hz   = v.rubbleHz * (0.45f + 1.4f * (1.0f - size)) * (1.0f + 0.1f * rng.bi());
             const float amp  = kGrainLevel * rumbleAmount * (0.25f + 0.75f * size) * std::min (1.0f, 0.4f + 0.4f * rubble) * last;
-            startNoise (hz, 0.7f, amp, 3.0f + 22.0f * size, (int) (rng.uni() * block), 0.9f * rng.bi());
+            startNoise (hz, 0.65f + 0.45f * snap.q, amp, 3.0f + 22.0f * size, (int) (rng.uni() * block), 0.9f * rng.bi(),
+                        0.35f + 2.2f * size, 0.04f + 0.12f * size);
         }
         expected -= 1.0f;
     }
@@ -563,9 +665,20 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
             if (c.startDelay > 0) { --c.startDelay; continue; }
             c.phase += radPerHz * c.freq;
             if (c.phase > kTwoPi) c.phase -= kTwoPi;
+            const float harmHz = c.freq * c.partial;
+            if (harmHz < 0.45f * fs)
+            {
+                c.phase2 += radPerHz * harmHz;
+                while (c.phase2 > kTwoPi) c.phase2 -= kTwoPi;
+            }
+            const float g = std::min (0.85f, kTwoPi * c.freq / fs);
+            c.lp1 += g * (c.rng.bi() - c.lp1);
+            c.lp2 += g * (c.lp1 - c.lp2);
+            const float air = (c.lp1 - c.lp2) * 2.2f;
+            const float harm = harmHz < 0.45f * fs ? c.partialGain * fastSin (c.phase2) : 0.0f;
             c.freq = std::max (c.freqMin, c.freq * c.freqMul);
             c.attack = std::min (1.0f, c.attack + c.attackInc);
-            const float s = fastSin (c.phase) * c.amp * c.attack;
+            const float s = (fastSin (c.phase) + harm + air * c.noiseMix) * c.amp * c.attack;
             c.amp *= c.ampDecay;
             outL[i] += s * c.panL;
             outR[i] += s * c.panR;
@@ -603,14 +716,14 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
             c.active = false;
     }
 
-    // Cracks, micro-fractures, landings and grains: band-passed noise bursts. They are independent
-    // of each other, so the sounding ones are packed into arrays and advanced together each sample
-    // (SIMD): noise generators, filters and envelopes for up to 64 voices in a few vector steps.
+    // Cracks, micro-fractures, landings and grains. Noise drives the band only for the burst;
+    // after that the band rings (and a dull material keeps a little grit). Packed and advanced
+    // together each sample, the same way as before.
     {
         constexpr int kMax = kNumNoises;
         static_assert (kMax % 8 == 0, "noise count must be a multiple of 8");
         alignas (32) float a1[kMax], a2[kMax], a3[kMax], s1[kMax], s2[kMax], amp[kMax], decay[kMax], panL[kMax], panR[kMax], tl[kMax], tr[kMax];
-        alignas (32) float gate[kMax];
+        alignas (32) float gate[kMax], burst[kMax], tail[kMax];
         alignas (32) uint32_t seed[kMax];
         int slot[kMax], waiting[kMax], count = 0, numWaiting = 0;
 
@@ -621,6 +734,7 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
             a1[count] = v.band.a1;  a2[count] = v.band.a2;  a3[count] = v.band.a3;
             s1[count] = v.band.ic1eq;  s2[count] = v.band.ic2eq;
             amp[count] = v.amp;  decay[count] = v.decay;  panL[count] = v.panL;  panR[count] = v.panR;
+            burst[count] = v.burst;  tail[count] = v.tail;
             seed[count] = v.rng.state;
             gate[count] = v.startDelay > 0 ? 0.0f : 1.0f;
             if (v.startDelay > 0) waiting[numWaiting++] = count;
@@ -633,6 +747,7 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
             for (int k = count; k < m; ++k)
             {
                 a1[k] = a2[k] = a3[k] = s1[k] = s2[k] = amp[k] = panL[k] = panR[k] = gate[k] = 0.0f;
+                burst[k] = tail[k] = 0.0f;
                 decay[k] = 1.0f;
                 seed[k] = 1u;
             }
@@ -661,7 +776,10 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
                     uint32_t r = seed[k];
                     r ^= r << 13;  r ^= r >> 17;  r ^= r << 5;
                     seed[k] = r;
-                    const float white = ((float) (r >> 8) * (2.0f / 16777216.0f) - 1.0f) * gate[k];
+                    const float full = burst[k] > 0.0f ? 1.0f : 0.0f;
+                    const float drive = gate[k] * (full + (1.0f - full) * tail[k]);
+                    burst[k] = std::max (0.0f, burst[k] - gate[k]);
+                    const float white = ((float) (r >> 8) * (2.0f / 16777216.0f) - 1.0f) * drive;
 
                     const float v3 = white - s2[k];
                     const float v1 = a1[k] * s1[k] + a2[k] * v3;
@@ -684,6 +802,8 @@ void ImpactGenerator::process (float* outL, float* outR, int n) noexcept
                 v.band.ic1eq = s1[k];
                 v.band.ic2eq = s2[k];
                 v.amp = amp[k];
+                v.burst = burst[k];
+                v.tail = tail[k];
                 v.rng.state = seed[k];
                 if (v.startDelay == 0 && v.amp < 1.0e-5f)
                     v.active = false;

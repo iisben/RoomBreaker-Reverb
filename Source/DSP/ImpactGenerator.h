@@ -9,21 +9,28 @@
 //
 //   Warning   before anything breaks, an overloaded wall crackles: sparse micro-
 //             fractures whose rate climbs as the load nears what the wall can take
-//             (acoustic emission). The room tells you it is about to go. Like real
-//             materials (the Kaiser effect) it only does so while the load climbs past
-//             what the wall recently carried: a held note or a steady sweep is silent.
+//             (acoustic emission). Each tick is a short hit — the crack starting, then
+//             arresting a fraction of a millisecond later — and ice and steel leave a
+//             faint ring. Like real materials (the Kaiser effect) it only does so while
+//             the load climbs past what the wall recently carried: a held note is silent.
 //   Crack     a fracture runs through the material instead of happening at once: a
-//             main snap, then a burst of micro-fractures over the material's crack
-//             time, faint ones far more common than loud ones, travelling across the
-//             stereo field. Big breaks snap lower and run longer; small ones tick.
+//             main snap, then micro-fractures over the material's crack time, faint
+//             ones far more common than loud ones, travelling across the stereo field.
+//             The snap is a few tenths of a millisecond of noise into a resonant band;
+//             the band rings after the hit. Stone keeps grit in that tail. Ice, glass
+//             and steel ring cleaner and add an inharmonic partial. Big breaks snap
+//             lower and run longer; small ones tick.
 //   Whistle   thin plates (ice, steel, glass) are dispersive: the crack arrives as a
-//             falling sweep (the "pew" of lake ice, the thunder of a buckling sheet).
+//             falling sweep (the "pew" of lake ice, the thunder of a buckling sheet),
+//             with air in the tone and a second partial, and it settles into a ring
+//             at the bottom of the sweep instead of staying a pure sine.
 //   Boom      the body of the hit: a falling sub sine plus a broadband thud. Bigger
 //             collapses go deeper. Mono, so the low end stays solid.
 //   Debris    pieces come loose, fall and land: each one has a size (many small, a few
-//             big), drops from a height set by Size and the wall it came from, lands
-//             after its fall time and bounces by the material's restitution. Glass and
-//             ice burst into tinkling fragments as they land. Landings feed the rubble.
+//             big), ticks as it lets go, is silent for its fall time, then clicks and
+//             thuds. Height comes from Size and which wall let go; bounces follow
+//             2·e·v/g and the material's restitution. Glass and ice burst; steel clangs;
+//             stone thuds. Landings feed the rubble.
 //   Settling  a big break is followed by aftershocks: smaller cracks whose rate falls
 //             off as 1/t over a few seconds (Omori's law), as the structure re-seats.
 //   Creak     slow, ductile failure: a stick-slip pulse train through the material's
@@ -49,7 +56,7 @@ public:
     static constexpr int kNumChirps    = 8;
     static constexpr int kNumCreaks    = 4;
     static constexpr int kNumSequences = 6;    // aftershock sequences
-    static constexpr int kQueueSize    = 384;  // landings and bounces still in the air
+    static constexpr int kQueueSize    = 512;  // releases, landings and bounces still in the air
     /** Longest a break keeps sounding after the input stops: aftershocks run 5 s, and rubble at
         its cap settles in about 6 s. The plugin adds this to the tail it reports to the host. */
     static constexpr float kMaxSettleSeconds = 7.0f;
@@ -94,17 +101,22 @@ private:
         int   startDelay = 0;
         SvfTpt band;
         float amp = 0.0f, decay = 0.99f;
+        float burst = 0.0f;               // samples of full excitation still to come
+        float tail = 0.0f;                // excitation left once the burst is over (0 = ring only)
         float panL = 0.707f, panR = 0.707f;
         Rng   rng { 1u };
     };
 
-    struct Chirp                          // a falling sine sweep (dispersion)
+    struct Chirp                          // a falling sweep: tone, a partial, and air
     {
         bool  active = false;
         int   startDelay = 0;
-        float phase = 0.0f, freq = 1000.0f, freqMul = 1.0f, freqMin = 100.0f;
+        float phase = 0.0f, phase2 = 0.0f, freq = 1000.0f, freqMul = 1.0f, freqMin = 100.0f;
+        float partial = 1.6f, partialGain = 0.3f, noiseMix = 0.3f;
+        float lp1 = 0.0f, lp2 = 0.0f;     // noise band that tracks the sweep
         float amp = 0.0f, ampDecay = 0.999f, attack = 0.0f, attackInc = 0.01f;
         float panL = 0.707f, panR = 0.707f;
+        Rng   rng { 1u };
     };
 
     struct Creak                          // stick-slip pulses through a resonance
@@ -118,9 +130,10 @@ private:
         Rng   rng { 1u };
     };
 
-    struct Pending                        // a piece in the air, or a bounce still to come
+    struct Pending                        // a piece in the air, a bounce, or the tick as it lets go
     {
         int   due = 0;                    // samples from the start of the current tick
+        int   kind = 0;                   // 0 = landing or bounce, 1 = the release tick
         float hz = 1000.0f, q = 1.0f, amp = 0.0f, decayMs = 5.0f, pan = 0.0f;
         float thump = 0.0f;               // heavy pieces thud the floor
         float rubble = 0.0f;              // what the landing adds to the rubble energy
@@ -136,12 +149,16 @@ private:
 
     Noise& allocateNoise() noexcept;
     void startBoom (int wall, float magnitude, float amp, int offset) noexcept;
-    void startNoise (float hz, float q, float amp, float decayMs, int delay, float pan) noexcept;
+    /** burstMs is how long noise drives the band. After that the band rings, with `tail`
+        (0..1) of the drive left in the tail so stone stays gritty and ice does not. */
+    void startNoise (float hz, float q, float amp, float decayMs, int delay, float pan,
+                     float burstMs, float tail = 0.0f) noexcept;
     void startChirp (float hiHz, float loHz, float ms, float amp, int delay, float pan) noexcept;
     void startCreak (int wall, float magnitude, int delay) noexcept;
     void crack (int wall, float magnitude, int offset, float level) noexcept;
     void dropPieces (int wall, float magnitude, int offset) noexcept;
     void schedule (const Pending&) noexcept;
+    void letGo (const Pending&, int offset) noexcept;
     void land (const Pending&, int offset) noexcept;
 
     float fs = 48000.0f;

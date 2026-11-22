@@ -50,6 +50,7 @@ void Engine::prepare (double newSampleRate)
     fdn.prepare (sampleRate);
     debris.prepare (sampleRate);
     impact.prepare (sampleRate);
+    granular.prepare (sampleRate);
 
     const int preSamples = (int) std::ceil (kMaxPredelayMs * 1.0e-3f * fs) + 8;
     preL.prepare (preSamples);
@@ -75,6 +76,7 @@ void Engine::reset()
     fdn.reset();
     debris.reset();
     impact.reset();
+    granular.reset();
     preL.reset(); preR.reset(); preKeyL.reset(); preKeyR.reset();
     lowCutL.reset(); lowCutR.reset(); highCutL.reset(); highCutR.reset();
     sideLow.reset();
@@ -141,8 +143,11 @@ void Engine::setParams (const EngineParams& p) noexcept
     stress.setConfig (cfg);
 
     debris.setMaterial (material);
-    impact.setVoicing (&getMaterialVoicing (p.material));
+    const auto& voice = getMaterialVoicing (p.material);
+    impact.setVoicing (&voice);
     impact.setAmounts (p.impact, p.rumble);
+    granular.setCharacter (voice.chirp, voice.shatter);
+    granular.setAmount (p.granular);
 }
 
 void Engine::requestStructureRestore (const WallArray& integrity) noexcept
@@ -398,6 +403,16 @@ void Engine::renderSlice (float* L, float* R, const float* keyL, const float* ke
     er.process (mono.data(), erL.data(), erR.data(), n);
     debris.process (debL.data(), debR.data(), n);
     impact.process (impL.data(), impR.data(), n);
+
+    // The break, before grains. Grains are added onto the impact bus, so the tank send
+    // below and the wet sum both hear them. Amount 0 does not touch impL/impR.
+    for (int i = 0; i < n; ++i)
+    {
+        const size_t s = (size_t) i;
+        tankInL[s] = impL[s] + debL[s];
+        tankInR[s] = impR[s] + debR[s];
+    }
+    granular.process (tankInL.data(), tankInR.data(), impL.data(), impR.data(), n);
 
     for (int i = 0; i < n; ++i)
     {

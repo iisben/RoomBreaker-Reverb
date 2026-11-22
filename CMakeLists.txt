@@ -20,6 +20,7 @@ add_library(rb_core STATIC
     Source/DSP/DynamicFDN.cpp
     Source/DSP/ModalDebrisGenerator.cpp
     Source/DSP/ImpactGenerator.cpp
+    Source/DSP/FractureGranulator.cpp
     Source/DSP/Engine.cpp)
 target_include_directories(rb_core PUBLIC Source/DSP)
 set_target_properties(rb_core PROPERTIES POSITION_INDEPENDENT_CODE ON)

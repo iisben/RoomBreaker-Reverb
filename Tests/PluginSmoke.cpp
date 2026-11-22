@@ -201,7 +201,7 @@ int main (int argc, char** argv)
         if (auto* withId = dynamic_cast<juce::AudioProcessorParameterWithID*> (param))
             std::printf ("    %-10s %-24s default: %s\n", withId->paramID.toRawUTF8(), param->getName (32).toRawUTF8(),
                          param->getText (param->getDefaultValue(), 32).toRawUTF8());
-    check (plugin->getParameters().size() == 29, "29 parameters (11 v1 + 17 v2 + bypass)");
+    check (plugin->getParameters().size() == 30, "30 parameters (11 v1 + 17 v2 + bypass + granular)");
     check (plugin->getBypassParameter() == findParam (*plugin, "bypass"), "bypass parameter is exposed to the host");
     {
         auto* heal = findParam (*plugin, "heal");

@@ -36,11 +36,16 @@ inline constexpr HelpEntry kHelp[] =
       "How fast damaged walls repair once the input calms down. Short times make the room breathe with the music. "
       "At the top of the range (Permadeath) damage is permanent until you press REBUILD." },
     { "impact", "Impact",
-      "The weight of each fracture: a sub boom that drops an octave, a crack transient panned to the wall that broke, "
-      "and a brief flex of the room's pitch. 0 % keeps destruction subtle; 100 % is trailer-hit territory." },
+      "The weight of each fracture: a sub boom, a crack that runs through the wall as a series of snaps, and a falling "
+      "whistle when the material is ice, glass or steel. Warning ticks sound while a wall is loaded past what it recently "
+      "carried. 0 % keeps destruction subtle; 100 % is trailer-hit territory." },
     { "rumble", "Rumble",
-      "Falling rubble after the hit: crumbling grains and a low rumble bed that build with every fracture and settle over "
-      "a few seconds. Loose walls keep shedding dust while the music plays." },
+      "Pieces letting go, falling for the time the room's height allows, then hitting and bouncing. Ice and glass tick "
+      "and shatter, steel clangs, stone thuds. Loose walls keep shedding dust while the music plays." },
+    { "granular", "Granular",
+      "Pitch-shifted grains of the cracks and the debris. At 0 % the destruction is untouched. Turn it up and breaks throw "
+      "short grains: ice and glass flick upward, steel drops and rings, rubble crunches downward. It only touches the "
+      "breaking, not the reverb of the room." },
     { "debris", "Debris",
       "Level of the ringing fragments: resonators tuned to the material, triggered by fractures, plus chatter and contact "
       "rattle from loose slabs. This is the pitched part of the destruction." },

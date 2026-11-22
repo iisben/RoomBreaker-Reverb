@@ -42,6 +42,7 @@ namespace ids
 
     // v3
     inline constexpr const char* bypass       = "bypass";
+    inline constexpr const char* granular     = "granular";
 }
 
 /** Oversampling choices: index → factor. */
@@ -87,6 +88,7 @@ private:
                       * motion = nullptr, * freeze = nullptr, * detonate = nullptr, * drive = nullptr,
                       * lowCut = nullptr, * highCut = nullptr, * width = nullptr, * duck = nullptr,
                       * inputGain = nullptr, * outputGain = nullptr, * limiter = nullptr,
-                      * oversampling = nullptr, * stressSource = nullptr, * bypass = nullptr;
+                      * oversampling = nullptr, * stressSource = nullptr, * bypass = nullptr,
+                      * granular = nullptr;
 };
 } // namespace rb

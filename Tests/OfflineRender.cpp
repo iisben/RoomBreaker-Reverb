@@ -560,7 +560,7 @@ int main (int argc, char** argv)
                 p.material = (int) (rng.uni() * 11.0f) % 11;  p.voidType = (int) (rng.uni() * 7.0f) % 7;
                 p.yieldDb = -40.0f + 40.0f * rng.uni();      p.ductileBias = rng.uni();  p.asymmetry = rng.uni();
                 p.healSeconds = 0.5f + 60.0f * rng.uni();    p.permadeath = rng.uni() < 0.2f;
-                p.impact = rng.uni(); p.rumble = rng.uni();  p.debrisLevel = rng.uni();
+                p.impact = rng.uni(); p.rumble = rng.uni();  p.debrisLevel = rng.uni(); p.granular = rng.uni();
                 p.size = 0.5f + 1.5f * rng.uni();            p.decaySeconds = 0.3f + 30.0f * rng.uni();
                 p.predelayMs = 250.0f * rng.uni();           p.density = rng.uni(); p.motion = rng.uni();
                 p.freeze = rng.uni() < 0.15f;                p.drive = rng.uni();

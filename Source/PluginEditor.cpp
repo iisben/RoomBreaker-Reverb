@@ -263,7 +263,7 @@ namespace
     const Section kSections[] =
     {
         { "Structure",   { { ids::yield, "Yield", 0.0 }, { ids::bias, "Ductility", 0.0 }, { ids::asymmetry, "Asymmetry", 0.0 }, { ids::heal, "Healing", 0.0 } } },
-        { "Destruction", { { ids::impact, "Impact", 0.0 }, { ids::rumble, "Rumble", 0.0 }, { ids::debris, "Debris", 0.0 }, { ids::drive, "Drive", 0.0 } } },
+        { "Destruction", { { ids::impact, "Impact", 0.0 }, { ids::rumble, "Rumble", 0.0 }, { ids::debris, "Debris", 0.0 }, { ids::granular, "Grain", 0.0 } } },
         { "Space",       { { ids::size, "Size", 0.0 }, { ids::decay, "Decay", 0.0 }, { ids::predelay, "Pre-delay", 0.0 }, { ids::density, "Density", 0.0 } } },
         { "Tone",        { { ids::lowCut, "Low cut", 0.0 }, { ids::highCut, "High cut", 0.0 }, { ids::width, "Width", 0.5 }, { ids::motion, "Motion", 0.0 } } },
     };
@@ -359,21 +359,30 @@ Rail::Rail (RoomBreakerAudioProcessor& p, bool isInput)
     {
         add (ids::mix, "Mix", 0.0);
         add (ids::duck, "Ducking", 0.0);
+        add (ids::drive, "Drive", 0.0);
         add (ids::outputGain, "Output", zeroDb (ids::outputGain));
     }
 }
 
 void Rail::resized()
 {
-    meter.setBounds (14, 14, getWidth() - 28, 336);
-    int y = 366;
+    const int knobH = Knob::heightFor (40.0f);
+    const int gap = 8;
+    const int n = knobs.size();
+    const int knobsH = n * knobH + std::max (0, n - 1) * gap;
+    const int tail = breakBy != nullptr ? 118 : 10;
+    int meterH = 336;
+    if (14 + meterH + 16 + knobsH + tail > getHeight())
+        meterH = std::max (160, getHeight() - 14 - 16 - knobsH - tail);
+    meter.setBounds (14, 14, getWidth() - 28, meterH);
+    int y = 14 + meterH + 16;
     for (auto* k : knobs)
     {
-        k->setBounds (0, y, getWidth(), Knob::heightFor (40.0f));
-        y += Knob::heightFor (40.0f) + 8;
+        k->setBounds (0, y, getWidth(), knobH);
+        y += knobH + gap;
     }
     if (breakBy != nullptr)
-        breakBy->setBounds (12, y + 20, getWidth() - 24, 84);
+        breakBy->setBounds (12, y + 14, getWidth() - 24, 84);
 }
 
 void Rail::paint (juce::Graphics& g)

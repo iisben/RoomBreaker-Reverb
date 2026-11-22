@@ -17,6 +17,7 @@ struct PresetFx
 {
     float impact   = 0.5f;
     float rumble   = 0.3f;
+    float granular = 0.0f;
     float predelay = 0.0f;      // ms
     float density  = 0.7f;
     float motion   = 0.25f;
@@ -57,7 +58,7 @@ const std::vector<FactoryPreset>& getFactoryPresets();
 inline constexpr const char* kPresetParamIds[] =
 {
     ids::material, ids::yield, ids::bias, ids::asymmetry, ids::voidType, ids::heal, ids::size, ids::decay,
-    ids::debris, ids::mix, ids::impact, ids::rumble, ids::predelay, ids::density, ids::motion, ids::drive,
+    ids::debris, ids::mix, ids::impact, ids::rumble, ids::granular, ids::predelay, ids::density, ids::motion, ids::drive,
     ids::lowCut, ids::highCut, ids::width, ids::duck
 };
 inline constexpr int kNumPresetParams = (int) (sizeof (kPresetParamIds) / sizeof (kPresetParamIds[0]));

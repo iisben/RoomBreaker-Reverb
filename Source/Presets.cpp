@@ -386,7 +386,7 @@ const std::vector<FactoryPreset>& getFactoryPresets()
 std::array<float, kNumPresetParams> plainValues (const FactoryPreset& p)
 {
     return { (float) p.material, p.yieldDb, p.bias, p.asymmetry, (float) p.voidType, p.healSeconds, p.size,
-             p.decaySeconds, p.debris, p.mix, p.fx.impact, p.fx.rumble, p.fx.predelay, p.fx.density, p.fx.motion,
+             p.decaySeconds, p.debris, p.mix, p.fx.impact, p.fx.rumble, p.fx.granular, p.fx.predelay, p.fx.density, p.fx.motion,
              p.fx.drive, p.fx.lowCut, p.fx.highCut, p.fx.width, p.fx.duck };
 }
 

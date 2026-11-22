@@ -11,6 +11,8 @@
 //                      ├──────┴───────────────┴───────────────┴──► DynamicFDN ─► tank
 //                      │                                              └─ vented ─► ExteriorTank
 //                      ▼
+//   Granular (0 = off) grains the impact + debris and adds that onto the impact bus,
+//   so the tank and the wet sum both hear the pitched cracks. The room itself is not grained.
 //   wet = ER + tank + exterior + debris + impact ─► Drive ─► Low/High Cut
 //         ─► Width (mono below 120 Hz) ─► Ducking ─► wet gain ─┐
 //   dry ─────────────────────────────────────────── dry gain ──┴─► out
@@ -25,6 +27,7 @@
 //==============================================================================
 #include "DynamicFDN.h"
 #include "EarlyReflectionEngine.h"
+#include "FractureGranulator.h"
 #include "ImpactGenerator.h"
 #include "ModalDebrisGenerator.h"
 #include "StressTracker.h"
@@ -50,6 +53,7 @@ struct EngineParams
     float impact       = 0.5f;
     float rumble       = 0.3f;
     float debrisLevel  = 0.6f;
+    float granular     = 0.0f;   // 0 = destruction untouched
 
     // Space
     float size         = 1.0f;
@@ -129,6 +133,7 @@ private:
     DynamicFDN            fdn;
     ModalDebrisGenerator  debris;
     ImpactGenerator       impact;
+    FractureGranulator    granular;
 
     int tickPosition = 0;                 // samples into the current control tick
     WallArray smoothedIntegrity {};

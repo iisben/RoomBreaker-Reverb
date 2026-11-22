@@ -133,6 +133,9 @@ AudioProcessorValueTreeState::ParameterLayout createParameterLayout()
         ParameterID { ids::impact, 2 }, "Impact", NormalisableRange<float> (0.0f, 1.0f), 0.5f, percentAttributes()));
     destruction->addChild (std::make_unique<AudioParameterFloat> (
         ParameterID { ids::rumble, 2 }, "Rumble", NormalisableRange<float> (0.0f, 1.0f), 0.3f, percentAttributes()));
+    // Version hint 3: a new id, so existing automation of Impact and Rumble stays put.
+    destruction->addChild (std::make_unique<AudioParameterFloat> (
+        ParameterID { ids::granular, 3 }, "Granular", NormalisableRange<float> (0.0f, 1.0f), 0.0f, percentAttributes()));
     destruction->addChild (std::make_unique<AudioParameterBool> (
         ParameterID { ids::detonate, 2 }, "Detonate", false));   // momentary, rising edge
     destruction->addChild (std::make_unique<AudioParameterChoice> (
@@ -213,11 +216,13 @@ ParameterCache::ParameterCache (AudioProcessorValueTreeState& s)
       limiter   (s.getRawParameterValue (ids::limiter)),
       oversampling (s.getRawParameterValue (ids::oversampling)),
       stressSource (s.getRawParameterValue (ids::stressSource)),
-      bypass    (s.getRawParameterValue (ids::bypass))
+      bypass    (s.getRawParameterValue (ids::bypass)),
+      granular  (s.getRawParameterValue (ids::granular))
 {
     jassert (material && yield && bias && asymmetry && voidType && heal && size && decay && debris && mix && reset);
     jassert (impact && rumble && predelay && density && motion && freeze && detonate && drive && lowCut && highCut
-             && width && duck && inputGain && outputGain && limiter && oversampling && stressSource && bypass);
+             && width && duck && inputGain && outputGain && limiter && oversampling && stressSource && bypass
+             && granular);
 }
 
 dsp::EngineParams ParameterCache::snapshot() const noexcept
@@ -238,6 +243,7 @@ dsp::EngineParams ParameterCache::snapshot() const noexcept
     p.mix          = mix->load (relaxed);
     p.impact       = impact->load (relaxed);
     p.rumble       = rumble->load (relaxed);
+    p.granular     = granular->load (relaxed);
     p.predelayMs   = predelay->load (relaxed);
     p.density      = density->load (relaxed);
     p.motion       = motion->load (relaxed);
