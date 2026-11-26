@@ -1,4 +1,7 @@
 # RoomBreaker
+I have dumped at least 60 hours of testing. I think it offers something unique and can be clean
+or destroy your audio. 
+Have fun
 
 A reverb whose room falls apart. Loud, low and sustained audio puts stress on six surfaces (four
 walls, ceiling, floor). They crack, loosen and breach. The tail gets rougher, then leaks into
