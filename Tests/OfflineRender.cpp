@@ -503,7 +503,7 @@ int main (int argc, char** argv)
                 worstDc = std::max (worstDc, std::abs (dc - 1.0));
                 for (int f = 0; f <= 512; ++f)
                 {
-                    const double w = M_PI * f / 512.0;
+                    const double w = kPiD * f / 512.0;
                     double re = 0.0, im = 0.0;
                     for (int k = 0; k < kSincTaps; ++k) { re += h[k] * std::cos (w * k); im -= h[k] * std::sin (w * k); }
                     worstPeak = std::max (worstPeak, std::sqrt (re * re + im * im));
