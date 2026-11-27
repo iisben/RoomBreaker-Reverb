@@ -1,6 +1,5 @@
 # RoomBreaker
-I have dumped at least 60 hours of testing. I think it offers something unique and can be clean
-or destroy your audio. 
+I am still learning, and I use Copilot to educate and assist me with JUCE. I will not release anything here without many hours of bug checks and testing. I will never charge a dime for anything I make until I have the full capability to build it the long way, from the old world.
 Have fun
 
 A reverb whose room falls apart. Loud, low and sustained audio puts stress on six surfaces (four
